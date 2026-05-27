@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>QRファイル受信</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", "Noto Sans JP", sans-serif;
+      margin: 0;
+      padding: 10px;
+      background: #121212;
+      color: #eee;
+    }
+    h1 { font-size: 1.1rem; margin: 0 0 8px; }
+    .row { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+    button {
+      padding: 8px 12px;
+      font-size: 0.95rem;
+      border-radius: 6px;
+      border: 1px solid #555;
+      background: #2a2a2a;
+      color: #eee;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+    button:disabled { opacity: 0.4; cursor: default; }
+    button.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
+    button.success { background: #16a34a; border-color: #16a34a; color: #fff; }
+    #video {
+      width: 100%;
+      max-width: 480px;
+      background: #000;
+      border-radius: 8px;
+      display: block;
+    }
+    #indicator {
+      display: inline-block;
+      width: 18px; height: 18px;
+      background: #c33;
+      border-radius: 4px;
+      transition: background 80ms ease-out;
+    }
+    #indicator.blink { background: #4ade80; }
+    #status { font-size: 0.9rem; }
+    #engine { font-size: 0.75rem; color: #888; margin-left: auto; }
+    #grid {
+      display: grid;
+      grid-template-columns: repeat(50, 1fr);
+      gap: 2px;
+      margin-top: 10px;
+      max-width: 100%;
+    }
+    .cell {
+      aspect-ratio: 1 / 1;
+      background: #3a3a3a;
+      font-size: 7px;
+      line-height: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #777;
+      border-radius: 1px;
+      overflow: hidden;
+    }
+    .cell.recv { background: #22c55e; color: #062; }
+    @media (max-width: 720px) {
+      #grid { grid-template-columns: repeat(30, 1fr); }
+      .cell { font-size: 6px; }
+    }
+    @media (max-width: 420px) {
+      #grid { grid-template-columns: repeat(20, 1fr); }
+      .cell { font-size: 0; }
+    }
+    canvas#work { display: none; }
+    .hint { font-size: 0.8rem; color: #999; margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <h1>QRファイル受信</h1>
+
+  <div class="row">
+    <button id="startBtn" class="primary">スキャン開始</button>
+    <button id="stopBtn" disabled>停止</button>
+    <button id="resetBtn">リセット</button>
+    <button id="saveBtn" class="success" disabled>保存</button>
+  </div>
+
+  <div class="row">
+    <span id="indicator" aria-label="認識インジケーター"></span>
+    <span id="status">準備中</span>
+    <span id="engine"></span>
+  </div>
+
+  <video id="video" playsinline muted autoplay></video>
+  <canvas id="work"></canvas>
+  <div id="grid"></div>
+  <p class="hint">QR動画をカメラに向けてください。全チャンク受信後「保存」ボタンでダウンロードされます。</p>
+
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+  <script>
+  (() => {
+    'use strict';
+
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('work');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const indicator = document.getElementById('indicator');
+    const statusEl = document.getElementById('status');
+    const engineEl = document.getElementById('engine');
+    const grid = document.getElementById('grid');
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const resetBtn = document.getElementById('resetBtn');
+    const saveBtn = document.getElementById('saveBtn');
+
+    let stream = null;
+    let detector = null;
+    let useNative = false;
+    let scanning = false;
+    let rafId = null;
+
+    let received = new Map();
+    let totalChunks = null;
+    let filename = null;
+    let cells = [];
+
+    const setStatus = (msg) => { statusEl.textContent = msg; };
+
+    function blinkIndicator() {
+      indicator.classList.add('blink');
+      clearTimeout(blinkIndicator._t);
+      blinkIndicator._t = setTimeout(() => indicator.classList.remove('blink'), 120);
+    }
+
+    function buildGrid(total) {
+      grid.innerHTML = '';
+      cells = new Array(total);
+      const frag = document.createDocumentFragment();
+      for (let i = 0; i < total; i++) {
+        const div = document.createElement('div');
+        div.className = 'cell';
+        div.textContent = i;
+        frag.appendChild(div);
+        cells[i] = div;
+      }
+      grid.appendChild(frag);
+    }
+
+    function markReceived(i) {
+      if (cells[i]) cells[i].classList.add('recv');
+    }
+
+    function base64ToBytes(b64) {
+      const bin = atob(b64);
+      const arr = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      return arr;
+    }
+
+    // payload format: "i/total|filename|base64chunk"
+    function processPayload(payload) {
+      const sep1 = payload.indexOf('|');
+      if (sep1 < 0) return false;
+      const sep2 = payload.indexOf('|', sep1 + 1);
+      if (sep2 < 0) return false;
+
+      const indexStr = payload.slice(0, sep1);
+      const filenameStr = payload.slice(sep1 + 1, sep2);
+      const chunkB64 = payload.slice(sep2 + 1);
+
+      const slash = indexStr.indexOf('/');
+      if (slash < 0) return false;
+      const idx = parseInt(indexStr.slice(0, slash), 10);
+      const tot = parseInt(indexStr.slice(slash + 1), 10);
+      if (!Number.isFinite(idx) || !Number.isFinite(tot) || tot <= 0) return false;
+      if (idx < 0 || idx >= tot) return false;
+
+      if (totalChunks == null) {
+        totalChunks = tot;
+        buildGrid(tot);
+      } else if (totalChunks !== tot) {
+        return false;
+      }
+      if (filenameStr) filename = filenameStr;
+
+      blinkIndicator();
+      if (received.has(idx)) return true;
+
+      let bytes;
+      try { bytes = base64ToBytes(chunkB64); }
+      catch (e) { return false; }
+
+      received.set(idx, bytes);
+      markReceived(idx);
+      setStatus(`受信中 ${received.size}/${totalChunks}${filename ? ' [' + filename + ']' : ''}`);
+
+      if (received.size === totalChunks) onComplete();
+      return true;
+    }
+
+    function onComplete() {
+      scanning = false;
+      stopCamera();
+      saveBtn.disabled = false;
+      setStatus(`受信完了 ${received.size}/${totalChunks}。「保存」を押してください。`);
+    }
+
+    function saveFile() {
+      if (totalChunks == null || received.size === 0) return;
+      let totalLen = 0;
+      for (let i = 0; i < totalChunks; i++) {
+        const c = received.get(i);
+        if (!c) {
+          setStatus(`チャンク ${i} が欠落しています。`);
+          return;
+        }
+        totalLen += c.length;
+      }
+      const buf = new Uint8Array(totalLen);
+      let off = 0;
+      for (let i = 0; i < totalChunks; i++) {
+        const c = received.get(i);
+        buf.set(c, off);
+        off += c.length;
+      }
+      const blob = new Blob([buf], { type: 'application/octet-stream' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename || 'received_file.bin';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+    }
+
+    async function setupDetector() {
+      detector = null;
+      useNative = false;
+      if ('BarcodeDetector' in window) {
+        try {
+          const formats = await window.BarcodeDetector.getSupportedFormats();
+          if (formats.includes('qr_code')) {
+            detector = new window.BarcodeDetector({ formats: ['qr_code'] });
+            useNative = true;
+          }
+        } catch (e) { /* fall back */ }
+      }
+      engineEl.textContent = useNative ? '[BarcodeDetector]' : (typeof jsQR === 'function' ? '[jsQR]' : '[?]');
+    }
+
+    async function startCamera() {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: 'environment' },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 }
+          },
+          audio: false
+        });
+        video.srcObject = stream;
+        await video.play();
+        await setupDetector();
+
+        if (!useNative && typeof jsQR !== 'function') {
+          setStatus('QRデコーダの読み込みに失敗しました（オンライン環境で再読込してください）');
+          stopCamera();
+          return;
+        }
+
+        scanning = true;
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+        setStatus('スキャン中…');
+        scanLoop();
+      } catch (e) {
+        setStatus('カメラ起動失敗: ' + (e && e.message ? e.message : e));
+      }
+    }
+
+    function stopCamera() {
+      scanning = false;
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = null;
+      if (stream) {
+        stream.getTracks().forEach(t => t.stop());
+        stream = null;
+      }
+      video.srcObject = null;
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+    }
+
+    async function scanFrameNative() {
+      try {
+        const codes = await detector.detect(video);
+        for (const c of codes) {
+          if (c.rawValue) processPayload(c.rawValue);
+        }
+      } catch (e) { /* transient */ }
+    }
+
+    function scanFrameJs() {
+      const vw = video.videoWidth, vh = video.videoHeight;
+      if (!vw || !vh) return;
+      canvas.width = vw;
+      canvas.height = vh;
+      ctx.drawImage(video, 0, 0, vw, vh);
+      let img;
+      try { img = ctx.getImageData(0, 0, vw, vh); }
+      catch (e) { return; }
+      const code = jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
+      if (code && code.data) processPayload(code.data);
+    }
+
+    async function scanLoop() {
+      if (!scanning) return;
+      if (useNative) await scanFrameNative();
+      else scanFrameJs();
+      if (scanning) rafId = requestAnimationFrame(scanLoop);
+    }
+
+    function reset() {
+      stopCamera();
+      received = new Map();
+      totalChunks = null;
+      filename = null;
+      cells = [];
+      grid.innerHTML = '';
+      saveBtn.disabled = true;
+      setStatus('リセット完了');
+    }
+
+    startBtn.addEventListener('click', startCamera);
+    stopBtn.addEventListener('click', stopCamera);
+    resetBtn.addEventListener('click', reset);
+    saveBtn.addEventListener('click', saveFile);
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setStatus('このブラウザはカメラAPIに対応していません');
+      startBtn.disabled = true;
+    } else if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
+      setStatus('HTTPSまたはlocalhostでのみカメラを利用できます');
+    } else {
+      setStatus('「スキャン開始」を押してカメラを起動');
+    }
+  })();
+  </script>
+</body>
+</html>
