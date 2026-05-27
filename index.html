@@ -29,9 +29,14 @@
     button:disabled { opacity: 0.4; cursor: default; }
     button.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
     button.success { background: #16a34a; border-color: #16a34a; color: #fff; }
-    #video {
+    .cam-wrap {
+      position: relative;
       width: 100%;
       max-width: 480px;
+      margin: 0 0 10px;
+    }
+    #video {
+      width: 100%;
       background: #000;
       border-radius: 8px;
       display: block;
@@ -47,26 +52,34 @@
     #status { font-size: 0.9rem; }
     #engine { font-size: 0.75rem; color: #888; margin-left: auto; }
     #grid {
+      position: absolute;
+      inset: 0;
+      padding: 4px;
       display: grid;
       grid-template-columns: repeat(50, 1fr);
       gap: 2px;
-      margin: 0 0 10px;
-      max-width: 100%;
+      align-content: start;
+      pointer-events: none;
+      overflow: hidden;
+      border-radius: 8px;
     }
     #grid:empty { display: none; }
     .cell {
       aspect-ratio: 1 / 1;
-      background: #3a3a3a;
+      background: rgba(120, 120, 120, 0.22);
       font-size: 7px;
       line-height: 1;
       display: flex;
       align-items: center;
       justify-content: center;
-      color: #777;
+      color: rgba(255, 255, 255, 0.35);
       border-radius: 1px;
       overflow: hidden;
     }
-    .cell.recv { background: #22c55e; color: #062; }
+    .cell.recv {
+      background: rgba(34, 197, 94, 0.7);
+      color: rgba(0, 50, 20, 0.85);
+    }
     @media (max-width: 720px) {
       #grid { grid-template-columns: repeat(30, 1fr); }
       .cell { font-size: 6px; }
@@ -95,8 +108,10 @@
     <span id="engine"></span>
   </div>
 
-  <div id="grid"></div>
-  <video id="video" playsinline muted autoplay></video>
+  <div class="cam-wrap">
+    <video id="video" playsinline muted autoplay></video>
+    <div id="grid"></div>
+  </div>
   <canvas id="work"></canvas>
   <p class="hint">QR動画をカメラに向けてください。全チャンク受信後「保存」ボタンでダウンロードされます。</p>
 
