@@ -1,5 +1,7 @@
 # qr-file-receiver
 
+公開URL: https://f2sk.github.io/qr-file-receiver/
+
 QR動画として送信されたファイルをブラウザで受信・保存するWebアプリ。
 スマートフォンのカメラでQR動画を撮影し、復元したバイナリをダウンロードする。
 
