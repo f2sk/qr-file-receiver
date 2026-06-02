@@ -29,6 +29,60 @@
     button:disabled { opacity: 0.4; cursor: default; }
     button.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
     button.success { background: #16a34a; border-color: #16a34a; color: #fff; }
+    button.muted { background: #444; border-color: #444; color: #aaa; }
+    .panel {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      padding: 10px;
+      background: #1f1f1f;
+      border-radius: 10px;
+      margin-bottom: 10px;
+    }
+    .indicator-big {
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      background: #4a1c1c;
+      flex-shrink: 0;
+      transition: background 200ms ease, transform 120ms ease, box-shadow 150ms ease;
+      box-shadow: 0 0 0 0 rgba(34, 197, 94, 0);
+    }
+    .indicator-big.blink {
+      background: #22c55e;
+      transform: scale(1.12);
+      box-shadow: 0 0 18px 4px rgba(34, 197, 94, 0.55);
+      transition: background 30ms ease, transform 30ms ease, box-shadow 30ms ease;
+    }
+    .counters { flex: 1; min-width: 0; }
+    .counter-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 8px;
+      font-size: 0.8rem;
+      color: #aaa;
+    }
+    .counter-row .value {
+      font-size: 1.5rem;
+      font-weight: 600;
+      color: #fff;
+      font-variant-numeric: tabular-nums;
+    }
+    .progress-bar {
+      width: 100%;
+      height: 8px;
+      background: #333;
+      border-radius: 4px;
+      overflow: hidden;
+      margin-top: 6px;
+    }
+    #progressFill {
+      height: 100%;
+      background: linear-gradient(90deg, #16a34a, #4ade80);
+      width: 0%;
+      transition: width 200ms ease;
+    }
     .cam-wrap {
       position: relative;
       width: 100%;
@@ -37,19 +91,13 @@
     }
     #video {
       width: 100%;
+      aspect-ratio: 1 / 1;
+      object-fit: cover;
       background: #000;
       border-radius: 8px;
       display: block;
     }
-    #indicator {
-      display: inline-block;
-      width: 18px; height: 18px;
-      background: #c33;
-      border-radius: 4px;
-      transition: background 80ms ease-out;
-    }
-    #indicator.blink { background: #4ade80; }
-    #status { font-size: 0.9rem; }
+    #status { font-size: 0.85rem; color: #ccc; }
     #engine { font-size: 0.75rem; color: #888; margin-left: auto; }
     #grid {
       position: absolute;
@@ -101,10 +149,25 @@
     <button id="stopBtn" disabled>停止</button>
     <button id="resetBtn">リセット</button>
     <button id="saveBtn" class="success" disabled>保存</button>
+    <button id="soundBtn">🔊 音 ON</button>
+  </div>
+
+  <div class="panel">
+    <div class="indicator-big" id="indicator" aria-label="認識インジケーター"></div>
+    <div class="counters">
+      <div class="counter-row">
+        <span>受信パケット</span>
+        <span class="value" id="packetCount">0</span>
+      </div>
+      <div class="counter-row">
+        <span>復号進捗 (rank / N)</span>
+        <span class="value" id="rankProgress">– / –</span>
+      </div>
+      <div class="progress-bar"><div id="progressFill"></div></div>
+    </div>
   </div>
 
   <div class="row">
-    <span id="indicator" aria-label="認識インジケーター"></span>
     <span id="status">準備中</span>
     <span id="engine"></span>
   </div>
@@ -115,7 +178,7 @@
   </div>
   <canvas id="work"></canvas>
   <div class="stats" id="stats"></div>
-  <p class="hint">QR動画をカメラに向けてください。全ソースブロックが解けた時点で「保存」が有効になります。</p>
+  <p class="hint">緑点滅＝QR認識成功。rankがN到達で復号完了。グリッドは解読済みソースブロック。</p>
 
   <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
   <script>
@@ -318,10 +381,14 @@
     const engineEl = document.getElementById('engine');
     const statsEl = document.getElementById('stats');
     const grid = document.getElementById('grid');
+    const packetCountEl = document.getElementById('packetCount');
+    const rankProgressEl = document.getElementById('rankProgress');
+    const progressFillEl = document.getElementById('progressFill');
     const startBtn = document.getElementById('startBtn');
     const stopBtn = document.getElementById('stopBtn');
     const resetBtn = document.getElementById('resetBtn');
     const saveBtn = document.getElementById('saveBtn');
+    const soundBtn = document.getElementById('soundBtn');
 
     let stream = null;
     let detector = null;
@@ -333,6 +400,10 @@
     let meta = { n: null, totalLen: null, filename: null };
     let seenPacketIds = new Set();
     let cells = [];
+    let qrDetectCount = 0;
+
+    let audioCtx = null;
+    let soundEnabled = true;
 
     const setStatus = (msg) => { statusEl.textContent = msg; };
     const setStats = (msg) => { statsEl.textContent = msg; };
@@ -340,7 +411,45 @@
     function blinkIndicator() {
       indicator.classList.add('blink');
       clearTimeout(blinkIndicator._t);
-      blinkIndicator._t = setTimeout(() => indicator.classList.remove('blink'), 120);
+      blinkIndicator._t = setTimeout(() => indicator.classList.remove('blink'), 220);
+    }
+
+    function ensureAudio() {
+      if (audioCtx === null && soundEnabled) {
+        try {
+          const Ctx = window.AudioContext || window.webkitAudioContext;
+          if (Ctx) audioCtx = new Ctx();
+        } catch (e) { audioCtx = null; }
+      }
+      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+    }
+
+    function tick() {
+      if (!soundEnabled || !audioCtx) return;
+      try {
+        const t = audioCtx.currentTime;
+        const o = audioCtx.createOscillator();
+        const g = audioCtx.createGain();
+        o.frequency.setValueAtTime(1600, t);
+        o.type = 'square';
+        g.gain.setValueAtTime(0.06, t);
+        g.gain.exponentialRampToValueAtTime(0.0005, t + 0.06);
+        o.connect(g).connect(audioCtx.destination);
+        o.start(t);
+        o.stop(t + 0.07);
+      } catch (e) { /* ignore */ }
+    }
+
+    function updateCountersUI() {
+      packetCountEl.textContent = String(qrDetectCount);
+      if (decoder) {
+        rankProgressEl.textContent = `${decoder.rank()} / ${decoder.n}`;
+        const pct = Math.min(100, (decoder.rank() / decoder.n) * 100);
+        progressFillEl.style.width = pct.toFixed(1) + '%';
+      } else {
+        rankProgressEl.textContent = '– / –';
+        progressFillEl.style.width = '0%';
+      }
     }
 
     function buildGrid(n) {
@@ -386,12 +495,18 @@
         buildGrid(info.n);
         setStatus(`受信開始: ${info.filename} (N=${info.n}, ${info.totalLen.toLocaleString()} bytes)`);
       } else if (info.n !== meta.n || info.totalLen !== meta.totalLen) {
-        // 別ファイルの混入は無視
         return false;
       }
 
+      // 認識フィードバック（重複でも発火）
+      qrDetectCount++;
       blinkIndicator();
-      if (seenPacketIds.has(info.packetId)) return true;
+      tick();
+
+      if (seenPacketIds.has(info.packetId)) {
+        updateCountersUI();
+        return true;
+      }
       seenPacketIds.add(info.packetId);
 
       if (info.payload.length !== decoder.chunkSize) return false;
@@ -400,6 +515,7 @@
       const affected = decoder.addPacket(indices, info.payload);
       refreshCells(affected);
       refreshStats();
+      updateCountersUI();
 
       if (decoder.complete()) onComplete();
       return true;
@@ -443,6 +559,7 @@
 
     async function startCamera() {
       try {
+        ensureAudio();
         stream = await navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: { ideal: 'environment' },
@@ -484,9 +601,26 @@
       stopBtn.disabled = true;
     }
 
+    // 表示と検出を一致させるため、中央を正方形にクロップしてからデコードする
+    function prepareCroppedCanvas() {
+      const vw = video.videoWidth, vh = video.videoHeight;
+      if (!vw || !vh) return null;
+      const size = Math.min(vw, vh);
+      const ox = (vw - size) >> 1;
+      const oy = (vh - size) >> 1;
+      if (canvas.width !== size || canvas.height !== size) {
+        canvas.width = size;
+        canvas.height = size;
+      }
+      ctx.drawImage(video, ox, oy, size, size, 0, 0, size, size);
+      return size;
+    }
+
     async function scanFrameNative() {
+      const size = prepareCroppedCanvas();
+      if (!size) return;
       try {
-        const codes = await detector.detect(video);
+        const codes = await detector.detect(canvas);
         for (const c of codes) {
           if (c.rawValue) processOne(c.rawValue);
         }
@@ -494,13 +628,10 @@
     }
 
     function scanFrameJs() {
-      const vw = video.videoWidth, vh = video.videoHeight;
-      if (!vw || !vh) return;
-      canvas.width = vw;
-      canvas.height = vh;
-      ctx.drawImage(video, 0, 0, vw, vh);
+      const size = prepareCroppedCanvas();
+      if (!size) return;
       let img;
-      try { img = ctx.getImageData(0, 0, vw, vh); }
+      try { img = ctx.getImageData(0, 0, size, size); }
       catch (e) { return; }
       const code = jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
       if (code && code.data) processOne(code.data);
@@ -519,16 +650,27 @@
       meta = { n: null, totalLen: null, filename: null };
       seenPacketIds = new Set();
       cells = [];
+      qrDetectCount = 0;
       grid.innerHTML = '';
       saveBtn.disabled = true;
       setStats('');
       setStatus('リセット完了');
+      updateCountersUI();
+    }
+
+    function toggleSound() {
+      soundEnabled = !soundEnabled;
+      soundBtn.textContent = soundEnabled ? '🔊 音 ON' : '🔈 音 OFF';
+      soundBtn.classList.toggle('muted', !soundEnabled);
+      if (soundEnabled) ensureAudio();
     }
 
     startBtn.addEventListener('click', startCamera);
     stopBtn.addEventListener('click', stopCamera);
     resetBtn.addEventListener('click', reset);
     saveBtn.addEventListener('click', saveFile);
+    soundBtn.addEventListener('click', toggleSound);
+    updateCountersUI();
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       setStatus('このブラウザはカメラAPIに対応していません');
