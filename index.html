@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-  <title>QRファイル受信</title>
+  <title>QRファイル受信 v2</title>
   <style>
     :root { color-scheme: dark; }
     * { box-sizing: border-box; }
@@ -76,7 +76,7 @@
       border-radius: 1px;
       overflow: hidden;
     }
-    .cell.recv {
+    .cell.solved {
       background: rgba(34, 197, 94, 0.7);
       color: rgba(0, 50, 20, 0.85);
     }
@@ -90,10 +90,11 @@
     }
     canvas#work { display: none; }
     .hint { font-size: 0.8rem; color: #999; margin-top: 6px; }
+    .stats { font-size: 0.85rem; color: #ccc; }
   </style>
 </head>
 <body>
-  <h1>QRファイル受信</h1>
+  <h1>QRファイル受信 v2 (ファウンテン符号化)</h1>
 
   <div class="row">
     <button id="startBtn" class="primary">スキャン開始</button>
@@ -113,19 +114,209 @@
     <div id="grid"></div>
   </div>
   <canvas id="work"></canvas>
-  <p class="hint">QR動画をカメラに向けてください。全チャンク受信後「保存」ボタンでダウンロードされます。</p>
+  <div class="stats" id="stats"></div>
+  <p class="hint">QR動画をカメラに向けてください。全ソースブロックが解けた時点で「保存」が有効になります。</p>
 
   <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
   <script>
   (() => {
     'use strict';
 
+    const PROTOCOL_VERSION = 'v2';
+    const DEGREE_TABLE = [
+      [2, 0.50],
+      [3, 0.30],
+      [5, 0.15],
+      [8, 0.05],
+    ];
+
+    // ===== PRNG (Python実装と同一の系列を生成) =====
+    function xorshift32(state) {
+      state ^= state << 13;
+      state ^= state >>> 17;
+      state ^= state << 5;
+      return state >>> 0;
+    }
+
+    function deriveSeed(packetId) {
+      const s = (packetId + 0x9E3779B9) >>> 0;
+      return s !== 0 ? s : 0x12345678;
+    }
+
+    function sampleDegree(state) {
+      state = xorshift32(state);
+      const r = state / 0xFFFFFFFF;
+      let cum = 0;
+      for (const [d, p] of DEGREE_TABLE) {
+        cum += p;
+        if (r < cum) return [d, state];
+      }
+      return [DEGREE_TABLE[DEGREE_TABLE.length - 1][0], state];
+    }
+
+    function sampleIndices(state, n, degree) {
+      const selected = [];
+      const seen = new Set();
+      const deg = Math.min(degree, n);
+      while (selected.length < deg) {
+        state = xorshift32(state);
+        const idx = state % n;
+        if (!seen.has(idx)) {
+          seen.add(idx);
+          selected.push(idx);
+        }
+      }
+      return [selected, state];
+    }
+
+    function derivePacketIndices(packetId, n) {
+      if (packetId < n) return [packetId];
+      let state = deriveSeed(packetId);
+      let degree;
+      [degree, state] = sampleDegree(state);
+      const [indices, _] = sampleIndices(state, n, degree);
+      return indices;
+    }
+
+    // ===== Fountain decoder (GF(2) Gauss-Jordan, online RREF) =====
+    class FountainDecoder {
+      constructor(n, chunkSize) {
+        this.n = n;
+        this.chunkSize = chunkSize;
+        this.maskBytes = (n + 7) >> 3;
+        this.pivots = new Array(n).fill(null);
+        this.packetsSeen = 0;
+        this.duplicates = 0;
+      }
+      _makeMask(indices) {
+        const m = new Uint8Array(this.maskBytes);
+        for (const i of indices) m[i >> 3] |= (1 << (i & 7));
+        return m;
+      }
+      _bit(mask, i) { return (mask[i >> 3] >> (i & 7)) & 1; }
+      _popcount(mask) {
+        let n = 0;
+        for (let bi = 0; bi < mask.length; bi++) {
+          let v = mask[bi];
+          while (v) { n += v & 1; v >>>= 1; }
+        }
+        return n;
+      }
+      _firstSetBit(mask) {
+        for (let bi = 0; bi < this.maskBytes; bi++) {
+          const b = mask[bi];
+          if (b) {
+            for (let i = 0; i < 8; i++) {
+              if (b & (1 << i)) {
+                const col = (bi << 3) | i;
+                return col < this.n ? col : -1;
+              }
+            }
+          }
+        }
+        return -1;
+      }
+      _xorInto(dest, src) {
+        for (let i = 0; i < dest.length; i++) dest[i] ^= src[i];
+      }
+      addPacket(indices, payloadBytes) {
+        this.packetsSeen++;
+        const mask = this._makeMask(indices);
+        const payload = new Uint8Array(payloadBytes);
+        const affected = new Set();
+
+        // 既存pivotで完全に簡約
+        for (let c = 0; c < this.n; c++) {
+          if (this.pivots[c] !== null && this._bit(mask, c) === 1) {
+            this._xorInto(mask, this.pivots[c].mask);
+            this._xorInto(payload, this.pivots[c].payload);
+          }
+        }
+
+        const newCol = this._firstSetBit(mask);
+        if (newCol < 0) {
+          this.duplicates++;
+          return affected;
+        }
+
+        // 既存pivot から new_col 列を消去（RREF維持）
+        for (let c = 0; c < this.n; c++) {
+          if (c !== newCol && this.pivots[c] !== null && this._bit(this.pivots[c].mask, newCol) === 1) {
+            this._xorInto(this.pivots[c].mask, mask);
+            this._xorInto(this.pivots[c].payload, payload);
+            affected.add(c);
+          }
+        }
+        this.pivots[newCol] = { mask, payload };
+        affected.add(newCol);
+        return affected;
+      }
+      isSolvedBlock(col) {
+        const p = this.pivots[col];
+        if (!p) return false;
+        return this._popcount(p.mask) === 1 && this._bit(p.mask, col) === 1;
+      }
+      solvedBlocks() {
+        let n = 0;
+        for (let i = 0; i < this.n; i++) if (this.isSolvedBlock(i)) n++;
+        return n;
+      }
+      rank() {
+        let n = 0;
+        for (const p of this.pivots) if (p) n++;
+        return n;
+      }
+      complete() { return this.solvedBlocks() === this.n; }
+      assemble(totalLen) {
+        const buf = new Uint8Array(this.n * this.chunkSize);
+        for (let i = 0; i < this.n; i++) {
+          buf.set(this.pivots[i].payload, i * this.chunkSize);
+        }
+        return buf.slice(0, totalLen);
+      }
+    }
+
+    // ===== Payload parser =====
+    function base64ToBytes(b64) {
+      const bin = atob(b64);
+      const arr = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      return arr;
+    }
+
+    function parsePayload(text) {
+      if (!text.startsWith(PROTOCOL_VERSION + '|')) return null;
+      // split into 6 parts: v2 | pid | N | total_len | filename_enc | b64
+      const parts = [];
+      let prev = 0;
+      for (let k = 0; k < 5; k++) {
+        const next = text.indexOf('|', prev);
+        if (next < 0) return null;
+        parts.push(text.slice(prev, next));
+        prev = next + 1;
+      }
+      parts.push(text.slice(prev));
+      if (parts.length !== 6) return null;
+      const [_, pidS, nS, tlS, fnEnc, b64] = parts;
+      const packetId = parseInt(pidS, 10);
+      const n = parseInt(nS, 10);
+      const totalLen = parseInt(tlS, 10);
+      if (!Number.isFinite(packetId) || !Number.isFinite(n) || !Number.isFinite(totalLen)) return null;
+      let filename;
+      try { filename = decodeURIComponent(fnEnc); } catch (e) { return null; }
+      let payload;
+      try { payload = base64ToBytes(b64); } catch (e) { return null; }
+      return { packetId, n, totalLen, filename, payload };
+    }
+
+    // ===== UI / scanning =====
     const video = document.getElementById('video');
     const canvas = document.getElementById('work');
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     const indicator = document.getElementById('indicator');
     const statusEl = document.getElementById('status');
     const engineEl = document.getElementById('engine');
+    const statsEl = document.getElementById('stats');
     const grid = document.getElementById('grid');
     const startBtn = document.getElementById('startBtn');
     const stopBtn = document.getElementById('stopBtn');
@@ -138,12 +329,13 @@
     let scanning = false;
     let rafId = null;
 
-    let received = new Map();
-    let totalChunks = null;
-    let filename = null;
+    let decoder = null;
+    let meta = { n: null, totalLen: null, filename: null };
+    let seenPacketIds = new Set();
     let cells = [];
 
     const setStatus = (msg) => { statusEl.textContent = msg; };
+    const setStats = (msg) => { statsEl.textContent = msg; };
 
     function blinkIndicator() {
       indicator.classList.add('blink');
@@ -151,11 +343,11 @@
       blinkIndicator._t = setTimeout(() => indicator.classList.remove('blink'), 120);
     }
 
-    function buildGrid(total) {
+    function buildGrid(n) {
       grid.innerHTML = '';
-      cells = new Array(total);
+      cells = new Array(n);
       const frag = document.createDocumentFragment();
-      for (let i = 0; i < total; i++) {
+      for (let i = 0; i < n; i++) {
         const div = document.createElement('div');
         div.className = 'cell';
         div.textContent = i;
@@ -165,55 +357,51 @@
       grid.appendChild(frag);
     }
 
-    function markReceived(i) {
-      if (cells[i]) cells[i].classList.add('recv');
+    function refreshCells(affected) {
+      if (!decoder) return;
+      const list = affected ? [...affected] : [...Array(decoder.n).keys()];
+      for (const i of list) {
+        if (decoder.isSolvedBlock(i)) cells[i] && cells[i].classList.add('solved');
+        else cells[i] && cells[i].classList.remove('solved');
+      }
     }
 
-    function base64ToBytes(b64) {
-      const bin = atob(b64);
-      const arr = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-      return arr;
+    function refreshStats() {
+      if (!decoder) {
+        setStats('');
+        return;
+      }
+      setStats(`packets=${decoder.packetsSeen} rank=${decoder.rank()}/${decoder.n} solved=${decoder.solvedBlocks()}/${decoder.n} (dup=${decoder.duplicates})`);
     }
 
-    // payload format: "i/total|filename|base64chunk"
-    function processPayload(payload) {
-      const sep1 = payload.indexOf('|');
-      if (sep1 < 0) return false;
-      const sep2 = payload.indexOf('|', sep1 + 1);
-      if (sep2 < 0) return false;
+    function processOne(text) {
+      const info = parsePayload(text);
+      if (!info) return false;
 
-      const indexStr = payload.slice(0, sep1);
-      const filenameStr = payload.slice(sep1 + 1, sep2);
-      const chunkB64 = payload.slice(sep2 + 1);
-
-      const slash = indexStr.indexOf('/');
-      if (slash < 0) return false;
-      const idx = parseInt(indexStr.slice(0, slash), 10);
-      const tot = parseInt(indexStr.slice(slash + 1), 10);
-      if (!Number.isFinite(idx) || !Number.isFinite(tot) || tot <= 0) return false;
-      if (idx < 0 || idx >= tot) return false;
-
-      if (totalChunks == null) {
-        totalChunks = tot;
-        buildGrid(tot);
-      } else if (totalChunks !== tot) {
+      if (decoder === null) {
+        meta.n = info.n;
+        meta.totalLen = info.totalLen;
+        meta.filename = info.filename;
+        decoder = new FountainDecoder(info.n, info.payload.length);
+        buildGrid(info.n);
+        setStatus(`受信開始: ${info.filename} (N=${info.n}, ${info.totalLen.toLocaleString()} bytes)`);
+      } else if (info.n !== meta.n || info.totalLen !== meta.totalLen) {
+        // 別ファイルの混入は無視
         return false;
       }
-      if (filenameStr) filename = filenameStr;
 
       blinkIndicator();
-      if (received.has(idx)) return true;
+      if (seenPacketIds.has(info.packetId)) return true;
+      seenPacketIds.add(info.packetId);
 
-      let bytes;
-      try { bytes = base64ToBytes(chunkB64); }
-      catch (e) { return false; }
+      if (info.payload.length !== decoder.chunkSize) return false;
 
-      received.set(idx, bytes);
-      markReceived(idx);
-      setStatus(`受信中 ${received.size}/${totalChunks}${filename ? ' [' + filename + ']' : ''}`);
+      const indices = derivePacketIndices(info.packetId, info.n);
+      const affected = decoder.addPacket(indices, info.payload);
+      refreshCells(affected);
+      refreshStats();
 
-      if (received.size === totalChunks) onComplete();
+      if (decoder.complete()) onComplete();
       return true;
     }
 
@@ -221,32 +409,17 @@
       scanning = false;
       stopCamera();
       saveBtn.disabled = false;
-      setStatus(`受信完了 ${received.size}/${totalChunks}。「保存」を押してください。`);
+      setStatus(`受信完了 ${decoder.solvedBlocks()}/${decoder.n}。「保存」を押してください。`);
     }
 
     function saveFile() {
-      if (totalChunks == null || received.size === 0) return;
-      let totalLen = 0;
-      for (let i = 0; i < totalChunks; i++) {
-        const c = received.get(i);
-        if (!c) {
-          setStatus(`チャンク ${i} が欠落しています。`);
-          return;
-        }
-        totalLen += c.length;
-      }
-      const buf = new Uint8Array(totalLen);
-      let off = 0;
-      for (let i = 0; i < totalChunks; i++) {
-        const c = received.get(i);
-        buf.set(c, off);
-        off += c.length;
-      }
-      const blob = new Blob([buf], { type: 'application/octet-stream' });
+      if (!decoder || !decoder.complete()) return;
+      const data = decoder.assemble(meta.totalLen);
+      const blob = new Blob([data], { type: 'application/octet-stream' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = filename || 'received_file.bin';
+      a.download = meta.filename || 'received_file.bin';
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -283,7 +456,7 @@
         await setupDetector();
 
         if (!useNative && typeof jsQR !== 'function') {
-          setStatus('QRデコーダの読み込みに失敗しました（オンライン環境で再読込してください）');
+          setStatus('QRデコーダの読み込みに失敗しました');
           stopCamera();
           return;
         }
@@ -291,7 +464,7 @@
         scanning = true;
         startBtn.disabled = true;
         stopBtn.disabled = false;
-        setStatus('スキャン中…');
+        if (!decoder) setStatus('スキャン中…');
         scanLoop();
       } catch (e) {
         setStatus('カメラ起動失敗: ' + (e && e.message ? e.message : e));
@@ -315,7 +488,7 @@
       try {
         const codes = await detector.detect(video);
         for (const c of codes) {
-          if (c.rawValue) processPayload(c.rawValue);
+          if (c.rawValue) processOne(c.rawValue);
         }
       } catch (e) { /* transient */ }
     }
@@ -330,7 +503,7 @@
       try { img = ctx.getImageData(0, 0, vw, vh); }
       catch (e) { return; }
       const code = jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
-      if (code && code.data) processPayload(code.data);
+      if (code && code.data) processOne(code.data);
     }
 
     async function scanLoop() {
@@ -342,12 +515,13 @@
 
     function reset() {
       stopCamera();
-      received = new Map();
-      totalChunks = null;
-      filename = null;
+      decoder = null;
+      meta = { n: null, totalLen: null, filename: null };
+      seenPacketIds = new Set();
       cells = [];
       grid.innerHTML = '';
       saveBtn.disabled = true;
+      setStats('');
       setStatus('リセット完了');
     }
 
