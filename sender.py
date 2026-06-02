@@ -156,7 +156,7 @@ def main():
     parser = argparse.ArgumentParser(description="QRファイル送信ツール v2（ファウンテン符号化）")
     parser.add_argument("file", help="送信するファイル")
     parser.add_argument("-o", "--output", help="出力動画ファイル名（既定: <FILE>.mp4）")
-    parser.add_argument("--chunk-size", type=int, default=500)
+    parser.add_argument("--chunk-size", type=int, default=400)
     parser.add_argument("--redundancy", type=float, default=1.5)
     parser.add_argument("--fps", type=int, default=5)
     parser.add_argument("--qr-version", type=int, default=20)
@@ -192,9 +192,22 @@ def main():
 
     ecc = ECC_MAP[args.ecc]
 
-    # まず1パケット分のQRを生成して画像サイズを確定（事前にwriterを初期化したいため）
-    sample_payload = make_qr_payload(0, n, total_len, file_path.name, source_blocks[0])
-    sample_img = render_qr(sample_payload, args.qr_version, ecc, args.box_size)
+    # 事前検証: 最も長くなる最終パケットのペイロード長でQRに収まるか確認
+    # （packet_id桁数が最大の末尾パケットを基準にする）
+    worst_pid = total_packets - 1
+    worst_payload = make_qr_payload(worst_pid, n, total_len, file_path.name, source_blocks[0])
+    try:
+        sample_img = render_qr(worst_payload, args.qr_version, ecc, args.box_size)
+    except Exception as e:
+        msg = str(e)
+        print(f"\nエラー: QRコードにペイロードが収まりません: {msg}", file=sys.stderr)
+        print(f"  ペイロード長: {len(worst_payload)} chars", file=sys.stderr)
+        print(f"  対応策（いずれかを試す）:", file=sys.stderr)
+        print(f"    1) --chunk-size を下げる（現在 {args.chunk_size}）", file=sys.stderr)
+        print(f"    2) --qr-version を上げる（現在 {args.qr_version}、最大 40）", file=sys.stderr)
+        print(f"    3) --ecc を下げる（現在 {args.ecc}、L < M < Q < H の順で容量が減る）", file=sys.stderr)
+        sys.exit(2)
+
     sample_img = sample_img.resize((args.qr_size, args.qr_size), Image.NEAREST)
     margin = 40
     frame_w, frame_h = args.qr_size, args.qr_size + margin

@@ -52,7 +52,7 @@ v2|packet_id|N|total_len|filename(URLencoded)|base64payload
 | QRバージョン | 40 | **20** |
 | 誤り訂正レベル | L (7%) | **M (15%)** |
 | box_size | 6 | **8** |
-| chunk_size | 1700 B | **500 B** |
+| chunk_size | 1700 B | **400 B** |
 | FPS | 任意 | 5 |
 
 低密度・高誤り訂正化により、レンズ収差・モーションブラー・フォーカスずれへの
@@ -69,7 +69,7 @@ python sender.py path/to/file.bin
 ```
 
 主なオプション:
-- `--chunk-size N` ソースブロックサイズ（既定500）
+- `--chunk-size N` ソースブロックサイズ（既定400。QR容量と相談）
 - `--redundancy 1.5` パケット数倍率（既定1.5）
 - `--fps 5` 動画フレームレート
 - `--qr-version 20` QRバージョン（1〜40）
