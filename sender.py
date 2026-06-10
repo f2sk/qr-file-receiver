@@ -134,10 +134,10 @@ def encode_packet(packet_id: int, n: int, source_blocks: list[bytes], chunk_size
     return bytes(payload)
 
 
-def make_qr_payload(packet_id: int, n: int, total_len: int, filename: str, chunk_data: bytes) -> str:
+def make_qr_payload(packet_id: int, n: int, m: int, total_len: int, filename: str, chunk_data: bytes) -> str:
     fn_enc = urllib.parse.quote(filename, safe="")
     b64 = base64.b64encode(chunk_data).decode("ascii")
-    return f"{PROTOCOL_VERSION}|{packet_id}|{n}|{total_len}|{fn_enc}|{b64}"
+    return f"{PROTOCOL_VERSION}|{packet_id}|{n}|{m}|{total_len}|{fn_enc}|{b64}"
 
 
 def render_qr(payload: str, version: int, ecc, box_size: int) -> Image.Image:
@@ -195,7 +195,7 @@ def main():
     # 事前検証: 最も長くなる最終パケットのペイロード長でQRに収まるか確認
     # （packet_id桁数が最大の末尾パケットを基準にする）
     worst_pid = total_packets - 1
-    worst_payload = make_qr_payload(worst_pid, n, total_len, file_path.name, source_blocks[0])
+    worst_payload = make_qr_payload(worst_pid, n, total_packets, total_len, file_path.name, source_blocks[0])
     try:
         sample_img = render_qr(worst_payload, args.qr_version, ecc, args.box_size)
     except Exception as e:
