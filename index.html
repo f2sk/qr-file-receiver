@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-  <title>QRファイル受信 v2</title>
+  <title>QRファイル受信</title>
   <style>
     :root { color-scheme: dark; }
     * { box-sizing: border-box; }
@@ -29,60 +29,6 @@
     button:disabled { opacity: 0.4; cursor: default; }
     button.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
     button.success { background: #16a34a; border-color: #16a34a; color: #fff; }
-    button.muted { background: #444; border-color: #444; color: #aaa; }
-    .panel {
-      display: flex;
-      gap: 12px;
-      align-items: center;
-      padding: 10px;
-      background: #1f1f1f;
-      border-radius: 10px;
-      margin-bottom: 10px;
-    }
-    .indicator-big {
-      width: 56px;
-      height: 56px;
-      border-radius: 50%;
-      background: #4a1c1c;
-      flex-shrink: 0;
-      transition: background 200ms ease, transform 120ms ease, box-shadow 150ms ease;
-      box-shadow: 0 0 0 0 rgba(34, 197, 94, 0);
-    }
-    .indicator-big.blink {
-      background: #22c55e;
-      transform: scale(1.12);
-      box-shadow: 0 0 18px 4px rgba(34, 197, 94, 0.55);
-      transition: background 30ms ease, transform 30ms ease, box-shadow 30ms ease;
-    }
-    .counters { flex: 1; min-width: 0; }
-    .counter-row {
-      display: flex;
-      justify-content: space-between;
-      align-items: baseline;
-      gap: 8px;
-      font-size: 0.8rem;
-      color: #aaa;
-    }
-    .counter-row .value {
-      font-size: 1.5rem;
-      font-weight: 600;
-      color: #fff;
-      font-variant-numeric: tabular-nums;
-    }
-    .progress-bar {
-      width: 100%;
-      height: 8px;
-      background: #333;
-      border-radius: 4px;
-      overflow: hidden;
-      margin-top: 6px;
-    }
-    #progressFill {
-      height: 100%;
-      background: linear-gradient(90deg, #16a34a, #4ade80);
-      width: 0%;
-      transition: width 200ms ease;
-    }
     .cam-wrap {
       position: relative;
       width: 100%;
@@ -91,13 +37,19 @@
     }
     #video {
       width: 100%;
-      aspect-ratio: 1 / 1;
-      object-fit: cover;
       background: #000;
       border-radius: 8px;
       display: block;
     }
-    #status { font-size: 0.85rem; color: #ccc; }
+    #indicator {
+      display: inline-block;
+      width: 18px; height: 18px;
+      background: #c33;
+      border-radius: 4px;
+      transition: background 80ms ease-out;
+    }
+    #indicator.blink { background: #4ade80; }
+    #status { font-size: 0.9rem; }
     #engine { font-size: 0.75rem; color: #888; margin-left: auto; }
     #grid {
       position: absolute;
@@ -124,7 +76,7 @@
       border-radius: 1px;
       overflow: hidden;
     }
-    .cell.solved {
+    .cell.recv {
       background: rgba(34, 197, 94, 0.7);
       color: rgba(0, 50, 20, 0.85);
     }
@@ -138,36 +90,20 @@
     }
     canvas#work { display: none; }
     .hint { font-size: 0.8rem; color: #999; margin-top: 6px; }
-    .stats { font-size: 0.85rem; color: #ccc; }
   </style>
 </head>
 <body>
-  <h1>QRファイル受信 v2 (ファウンテン符号化)</h1>
+  <h1>QRファイル受信</h1>
 
   <div class="row">
     <button id="startBtn" class="primary">スキャン開始</button>
     <button id="stopBtn" disabled>停止</button>
     <button id="resetBtn">リセット</button>
     <button id="saveBtn" class="success" disabled>保存</button>
-    <button id="soundBtn">🔊 音 ON</button>
-  </div>
-
-  <div class="panel">
-    <div class="indicator-big" id="indicator" aria-label="認識インジケーター"></div>
-    <div class="counters">
-      <div class="counter-row">
-        <span>受信パケット</span>
-        <span class="value" id="packetCount">0</span>
-      </div>
-      <div class="counter-row">
-        <span>復号進捗 (rank / N)</span>
-        <span class="value" id="rankProgress">– / –</span>
-      </div>
-      <div class="progress-bar"><div id="progressFill"></div></div>
-    </div>
   </div>
 
   <div class="row">
+    <span id="indicator" aria-label="認識インジケーター"></span>
     <span id="status">準備中</span>
     <span id="engine"></span>
   </div>
@@ -177,218 +113,24 @@
     <div id="grid"></div>
   </div>
   <canvas id="work"></canvas>
-  <div class="stats" id="stats"></div>
-  <p class="hint">緑点滅＝QR認識成功。rankがN到達で復号完了。グリッドは解読済みソースブロック。</p>
+  <p class="hint">QR動画をカメラに向けてください。全チャンク受信後「保存」ボタンでダウンロードされます。</p>
 
   <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
   <script>
   (() => {
     'use strict';
 
-    const PROTOCOL_VERSION = 'v2';
-    const DEGREE_TABLE = [
-      [2, 0.50],
-      [3, 0.30],
-      [5, 0.15],
-      [8, 0.05],
-    ];
-
-    // ===== PRNG (Python実装と同一の系列を生成) =====
-    function xorshift32(state) {
-      state ^= state << 13;
-      state ^= state >>> 17;
-      state ^= state << 5;
-      return state >>> 0;
-    }
-
-    function deriveSeed(packetId) {
-      const s = (packetId + 0x9E3779B9) >>> 0;
-      return s !== 0 ? s : 0x12345678;
-    }
-
-    function sampleDegree(state) {
-      state = xorshift32(state);
-      const r = state / 0xFFFFFFFF;
-      let cum = 0;
-      for (const [d, p] of DEGREE_TABLE) {
-        cum += p;
-        if (r < cum) return [d, state];
-      }
-      return [DEGREE_TABLE[DEGREE_TABLE.length - 1][0], state];
-    }
-
-    function sampleIndices(state, n, degree) {
-      const selected = [];
-      const seen = new Set();
-      const deg = Math.min(degree, n);
-      while (selected.length < deg) {
-        state = xorshift32(state);
-        const idx = state % n;
-        if (!seen.has(idx)) {
-          seen.add(idx);
-          selected.push(idx);
-        }
-      }
-      return [selected, state];
-    }
-
-    function derivePacketIndices(packetId, n) {
-      if (packetId < n) return [packetId];
-      let state = deriveSeed(packetId);
-      let degree;
-      [degree, state] = sampleDegree(state);
-      const [indices, _] = sampleIndices(state, n, degree);
-      return indices;
-    }
-
-    // ===== Fountain decoder (GF(2) Gauss-Jordan, online RREF) =====
-    class FountainDecoder {
-      constructor(n, chunkSize) {
-        this.n = n;
-        this.chunkSize = chunkSize;
-        this.maskBytes = (n + 7) >> 3;
-        this.pivots = new Array(n).fill(null);
-        this.packetsSeen = 0;
-        this.duplicates = 0;
-      }
-      _makeMask(indices) {
-        const m = new Uint8Array(this.maskBytes);
-        for (const i of indices) m[i >> 3] |= (1 << (i & 7));
-        return m;
-      }
-      _bit(mask, i) { return (mask[i >> 3] >> (i & 7)) & 1; }
-      _popcount(mask) {
-        let n = 0;
-        for (let bi = 0; bi < mask.length; bi++) {
-          let v = mask[bi];
-          while (v) { n += v & 1; v >>>= 1; }
-        }
-        return n;
-      }
-      _firstSetBit(mask) {
-        for (let bi = 0; bi < this.maskBytes; bi++) {
-          const b = mask[bi];
-          if (b) {
-            for (let i = 0; i < 8; i++) {
-              if (b & (1 << i)) {
-                const col = (bi << 3) | i;
-                return col < this.n ? col : -1;
-              }
-            }
-          }
-        }
-        return -1;
-      }
-      _xorInto(dest, src) {
-        for (let i = 0; i < dest.length; i++) dest[i] ^= src[i];
-      }
-      addPacket(indices, payloadBytes) {
-        this.packetsSeen++;
-        const mask = this._makeMask(indices);
-        const payload = new Uint8Array(payloadBytes);
-        const affected = new Set();
-
-        // 既存pivotで完全に簡約
-        for (let c = 0; c < this.n; c++) {
-          if (this.pivots[c] !== null && this._bit(mask, c) === 1) {
-            this._xorInto(mask, this.pivots[c].mask);
-            this._xorInto(payload, this.pivots[c].payload);
-          }
-        }
-
-        const newCol = this._firstSetBit(mask);
-        if (newCol < 0) {
-          this.duplicates++;
-          return affected;
-        }
-
-        // 既存pivot から new_col 列を消去（RREF維持）
-        for (let c = 0; c < this.n; c++) {
-          if (c !== newCol && this.pivots[c] !== null && this._bit(this.pivots[c].mask, newCol) === 1) {
-            this._xorInto(this.pivots[c].mask, mask);
-            this._xorInto(this.pivots[c].payload, payload);
-            affected.add(c);
-          }
-        }
-        this.pivots[newCol] = { mask, payload };
-        affected.add(newCol);
-        return affected;
-      }
-      isSolvedBlock(col) {
-        const p = this.pivots[col];
-        if (!p) return false;
-        return this._popcount(p.mask) === 1 && this._bit(p.mask, col) === 1;
-      }
-      solvedBlocks() {
-        let n = 0;
-        for (let i = 0; i < this.n; i++) if (this.isSolvedBlock(i)) n++;
-        return n;
-      }
-      rank() {
-        let n = 0;
-        for (const p of this.pivots) if (p) n++;
-        return n;
-      }
-      complete() { return this.solvedBlocks() === this.n; }
-      assemble(totalLen) {
-        const buf = new Uint8Array(this.n * this.chunkSize);
-        for (let i = 0; i < this.n; i++) {
-          buf.set(this.pivots[i].payload, i * this.chunkSize);
-        }
-        return buf.slice(0, totalLen);
-      }
-    }
-
-    // ===== Payload parser =====
-    function base64ToBytes(b64) {
-      const bin = atob(b64);
-      const arr = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-      return arr;
-    }
-
-    function parsePayload(text) {
-      if (!text.startsWith(PROTOCOL_VERSION + '|')) return null;
-      // split into 6 parts: v2 | pid | N | total_len | filename_enc | b64
-      const parts = [];
-      let prev = 0;
-      for (let k = 0; k < 5; k++) {
-        const next = text.indexOf('|', prev);
-        if (next < 0) return null;
-        parts.push(text.slice(prev, next));
-        prev = next + 1;
-      }
-      parts.push(text.slice(prev));
-      if (parts.length !== 6) return null;
-      const [_, pidS, nS, tlS, fnEnc, b64] = parts;
-      const packetId = parseInt(pidS, 10);
-      const n = parseInt(nS, 10);
-      const totalLen = parseInt(tlS, 10);
-      if (!Number.isFinite(packetId) || !Number.isFinite(n) || !Number.isFinite(totalLen)) return null;
-      let filename;
-      try { filename = decodeURIComponent(fnEnc); } catch (e) { return null; }
-      let payload;
-      try { payload = base64ToBytes(b64); } catch (e) { return null; }
-      return { packetId, n, totalLen, filename, payload };
-    }
-
-    // ===== UI / scanning =====
     const video = document.getElementById('video');
     const canvas = document.getElementById('work');
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     const indicator = document.getElementById('indicator');
     const statusEl = document.getElementById('status');
     const engineEl = document.getElementById('engine');
-    const statsEl = document.getElementById('stats');
     const grid = document.getElementById('grid');
-    const packetCountEl = document.getElementById('packetCount');
-    const rankProgressEl = document.getElementById('rankProgress');
-    const progressFillEl = document.getElementById('progressFill');
     const startBtn = document.getElementById('startBtn');
     const stopBtn = document.getElementById('stopBtn');
     const resetBtn = document.getElementById('resetBtn');
     const saveBtn = document.getElementById('saveBtn');
-    const soundBtn = document.getElementById('soundBtn');
 
     let stream = null;
     let detector = null;
@@ -396,67 +138,24 @@
     let scanning = false;
     let rafId = null;
 
-    let decoder = null;
-    let meta = { n: null, totalLen: null, filename: null };
-    let seenPacketIds = new Set();
+    let received = new Map();
+    let totalChunks = null;
+    let filename = null;
     let cells = [];
-    let qrDetectCount = 0;
-
-    let audioCtx = null;
-    let soundEnabled = true;
 
     const setStatus = (msg) => { statusEl.textContent = msg; };
-    const setStats = (msg) => { statsEl.textContent = msg; };
 
     function blinkIndicator() {
       indicator.classList.add('blink');
       clearTimeout(blinkIndicator._t);
-      blinkIndicator._t = setTimeout(() => indicator.classList.remove('blink'), 220);
+      blinkIndicator._t = setTimeout(() => indicator.classList.remove('blink'), 120);
     }
 
-    function ensureAudio() {
-      if (audioCtx === null && soundEnabled) {
-        try {
-          const Ctx = window.AudioContext || window.webkitAudioContext;
-          if (Ctx) audioCtx = new Ctx();
-        } catch (e) { audioCtx = null; }
-      }
-      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
-    }
-
-    function tick() {
-      if (!soundEnabled || !audioCtx) return;
-      try {
-        const t = audioCtx.currentTime;
-        const o = audioCtx.createOscillator();
-        const g = audioCtx.createGain();
-        o.frequency.setValueAtTime(1600, t);
-        o.type = 'square';
-        g.gain.setValueAtTime(0.06, t);
-        g.gain.exponentialRampToValueAtTime(0.0005, t + 0.06);
-        o.connect(g).connect(audioCtx.destination);
-        o.start(t);
-        o.stop(t + 0.07);
-      } catch (e) { /* ignore */ }
-    }
-
-    function updateCountersUI() {
-      packetCountEl.textContent = String(qrDetectCount);
-      if (decoder) {
-        rankProgressEl.textContent = `${decoder.rank()} / ${decoder.n}`;
-        const pct = Math.min(100, (decoder.rank() / decoder.n) * 100);
-        progressFillEl.style.width = pct.toFixed(1) + '%';
-      } else {
-        rankProgressEl.textContent = '– / –';
-        progressFillEl.style.width = '0%';
-      }
-    }
-
-    function buildGrid(n) {
+    function buildGrid(total) {
       grid.innerHTML = '';
-      cells = new Array(n);
+      cells = new Array(total);
       const frag = document.createDocumentFragment();
-      for (let i = 0; i < n; i++) {
+      for (let i = 0; i < total; i++) {
         const div = document.createElement('div');
         div.className = 'cell';
         div.textContent = i;
@@ -466,58 +165,55 @@
       grid.appendChild(frag);
     }
 
-    function refreshCells(affected) {
-      if (!decoder) return;
-      const list = affected ? [...affected] : [...Array(decoder.n).keys()];
-      for (const i of list) {
-        if (decoder.isSolvedBlock(i)) cells[i] && cells[i].classList.add('solved');
-        else cells[i] && cells[i].classList.remove('solved');
-      }
+    function markReceived(i) {
+      if (cells[i]) cells[i].classList.add('recv');
     }
 
-    function refreshStats() {
-      if (!decoder) {
-        setStats('');
-        return;
-      }
-      setStats(`packets=${decoder.packetsSeen} rank=${decoder.rank()}/${decoder.n} solved=${decoder.solvedBlocks()}/${decoder.n} (dup=${decoder.duplicates})`);
+    function base64ToBytes(b64) {
+      const bin = atob(b64);
+      const arr = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      return arr;
     }
 
-    function processOne(text) {
-      const info = parsePayload(text);
-      if (!info) return false;
+    // payload format: "i/total|filename|base64chunk"
+    function processPayload(payload) {
+      const sep1 = payload.indexOf('|');
+      if (sep1 < 0) return false;
+      const sep2 = payload.indexOf('|', sep1 + 1);
+      if (sep2 < 0) return false;
 
-      if (decoder === null) {
-        meta.n = info.n;
-        meta.totalLen = info.totalLen;
-        meta.filename = info.filename;
-        decoder = new FountainDecoder(info.n, info.payload.length);
-        buildGrid(info.n);
-        setStatus(`受信開始: ${info.filename} (N=${info.n}, ${info.totalLen.toLocaleString()} bytes)`);
-      } else if (info.n !== meta.n || info.totalLen !== meta.totalLen) {
+      const indexStr = payload.slice(0, sep1);
+      const filenameStr = payload.slice(sep1 + 1, sep2);
+      const chunkB64 = payload.slice(sep2 + 1);
+
+      const slash = indexStr.indexOf('/');
+      if (slash < 0) return false;
+      const idx = parseInt(indexStr.slice(0, slash), 10);
+      const tot = parseInt(indexStr.slice(slash + 1), 10);
+      if (!Number.isFinite(idx) || !Number.isFinite(tot) || tot <= 0) return false;
+      if (idx < 0 || idx >= tot) return false;
+
+      if (totalChunks == null) {
+        totalChunks = tot;
+        buildGrid(tot);
+      } else if (totalChunks !== tot) {
         return false;
       }
+      if (filenameStr) filename = filenameStr;
 
-      // 認識フィードバック（重複でも発火）
-      qrDetectCount++;
       blinkIndicator();
-      tick();
+      if (received.has(idx)) return true;
 
-      if (seenPacketIds.has(info.packetId)) {
-        updateCountersUI();
-        return true;
-      }
-      seenPacketIds.add(info.packetId);
+      let bytes;
+      try { bytes = base64ToBytes(chunkB64); }
+      catch (e) { return false; }
 
-      if (info.payload.length !== decoder.chunkSize) return false;
+      received.set(idx, bytes);
+      markReceived(idx);
+      setStatus(`受信中 ${received.size}/${totalChunks}${filename ? ' [' + filename + ']' : ''}`);
 
-      const indices = derivePacketIndices(info.packetId, info.n);
-      const affected = decoder.addPacket(indices, info.payload);
-      refreshCells(affected);
-      refreshStats();
-      updateCountersUI();
-
-      if (decoder.complete()) onComplete();
+      if (received.size === totalChunks) onComplete();
       return true;
     }
 
@@ -525,17 +221,32 @@
       scanning = false;
       stopCamera();
       saveBtn.disabled = false;
-      setStatus(`受信完了 ${decoder.solvedBlocks()}/${decoder.n}。「保存」を押してください。`);
+      setStatus(`受信完了 ${received.size}/${totalChunks}。「保存」を押してください。`);
     }
 
     function saveFile() {
-      if (!decoder || !decoder.complete()) return;
-      const data = decoder.assemble(meta.totalLen);
-      const blob = new Blob([data], { type: 'application/octet-stream' });
+      if (totalChunks == null || received.size === 0) return;
+      let totalLen = 0;
+      for (let i = 0; i < totalChunks; i++) {
+        const c = received.get(i);
+        if (!c) {
+          setStatus(`チャンク ${i} が欠落しています。`);
+          return;
+        }
+        totalLen += c.length;
+      }
+      const buf = new Uint8Array(totalLen);
+      let off = 0;
+      for (let i = 0; i < totalChunks; i++) {
+        const c = received.get(i);
+        buf.set(c, off);
+        off += c.length;
+      }
+      const blob = new Blob([buf], { type: 'application/octet-stream' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = meta.filename || 'received_file.bin';
+      a.download = filename || 'received_file.bin';
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -559,7 +270,6 @@
 
     async function startCamera() {
       try {
-        ensureAudio();
         stream = await navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: { ideal: 'environment' },
@@ -573,7 +283,7 @@
         await setupDetector();
 
         if (!useNative && typeof jsQR !== 'function') {
-          setStatus('QRデコーダの読み込みに失敗しました');
+          setStatus('QRデコーダの読み込みに失敗しました（オンライン環境で再読込してください）');
           stopCamera();
           return;
         }
@@ -581,7 +291,7 @@
         scanning = true;
         startBtn.disabled = true;
         stopBtn.disabled = false;
-        if (!decoder) setStatus('スキャン中…');
+        setStatus('スキャン中…');
         scanLoop();
       } catch (e) {
         setStatus('カメラ起動失敗: ' + (e && e.message ? e.message : e));
@@ -601,40 +311,26 @@
       stopBtn.disabled = true;
     }
 
-    // 表示と検出を一致させるため、中央を正方形にクロップしてからデコードする
-    function prepareCroppedCanvas() {
-      const vw = video.videoWidth, vh = video.videoHeight;
-      if (!vw || !vh) return null;
-      const size = Math.min(vw, vh);
-      const ox = (vw - size) >> 1;
-      const oy = (vh - size) >> 1;
-      if (canvas.width !== size || canvas.height !== size) {
-        canvas.width = size;
-        canvas.height = size;
-      }
-      ctx.drawImage(video, ox, oy, size, size, 0, 0, size, size);
-      return size;
-    }
-
     async function scanFrameNative() {
-      const size = prepareCroppedCanvas();
-      if (!size) return;
       try {
-        const codes = await detector.detect(canvas);
+        const codes = await detector.detect(video);
         for (const c of codes) {
-          if (c.rawValue) processOne(c.rawValue);
+          if (c.rawValue) processPayload(c.rawValue);
         }
       } catch (e) { /* transient */ }
     }
 
     function scanFrameJs() {
-      const size = prepareCroppedCanvas();
-      if (!size) return;
+      const vw = video.videoWidth, vh = video.videoHeight;
+      if (!vw || !vh) return;
+      canvas.width = vw;
+      canvas.height = vh;
+      ctx.drawImage(video, 0, 0, vw, vh);
       let img;
-      try { img = ctx.getImageData(0, 0, size, size); }
+      try { img = ctx.getImageData(0, 0, vw, vh); }
       catch (e) { return; }
       const code = jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
-      if (code && code.data) processOne(code.data);
+      if (code && code.data) processPayload(code.data);
     }
 
     async function scanLoop() {
@@ -646,31 +342,19 @@
 
     function reset() {
       stopCamera();
-      decoder = null;
-      meta = { n: null, totalLen: null, filename: null };
-      seenPacketIds = new Set();
+      received = new Map();
+      totalChunks = null;
+      filename = null;
       cells = [];
-      qrDetectCount = 0;
       grid.innerHTML = '';
       saveBtn.disabled = true;
-      setStats('');
       setStatus('リセット完了');
-      updateCountersUI();
-    }
-
-    function toggleSound() {
-      soundEnabled = !soundEnabled;
-      soundBtn.textContent = soundEnabled ? '🔊 音 ON' : '🔈 音 OFF';
-      soundBtn.classList.toggle('muted', !soundEnabled);
-      if (soundEnabled) ensureAudio();
     }
 
     startBtn.addEventListener('click', startCamera);
     stopBtn.addEventListener('click', stopCamera);
     resetBtn.addEventListener('click', reset);
     saveBtn.addEventListener('click', saveFile);
-    soundBtn.addEventListener('click', toggleSound);
-    updateCountersUI();
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       setStatus('このブラウザはカメラAPIに対応していません');
