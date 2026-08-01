@@ -1,6 +1,8 @@
 # qr-file-receiver
 
-公開URL: https://f2sk.github.io/qr-file-receiver/
+公開URL:
+- 逐次チャンク版（従来）: https://f2sk.github.io/qr-file-receiver/
+- fountain版（新, LT符号＋zxing-wasm）: https://f2sk.github.io/qr-file-receiver/fountain/
 
 QR動画として送信されたファイルをブラウザで受信・保存するWebアプリ。
 スマートフォンのカメラでQR動画を撮影し、復元したバイナリをダウンロードする。
