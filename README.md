@@ -1,42 +1,35 @@
 # qr-file-receiver
 
-公開URL:
-- 受信（逐次チャンク版・従来）: https://f2sk.github.io/qr-file-receiver/
-- 受信（fountain版・新, LT符号＋zxing-wasm）: https://f2sk.github.io/qr-file-receiver/fountain/
-- 送信（fountain版・ブラウザでmp4生成, WebCodecs）: https://f2sk.github.io/qr-file-receiver/fountain/send.html
-  （自己完結HTML。Rawを保存すればChromeでローカル・オフライン動作も可）
+QR動画でファイルを転送するツール。画面→カメラの片方向光チャネルだけで、ネットワークもアプリも使わずにファイルを送る。
+現行版は **fountain符号（LT）** を採用し、各フレームを複数ブロックのXORにすることで「特定ブロック⇔特定フレーム」の鎖を断つ。
+光の当たり方で読めないフレームがあっても、十分な枚数（約K×1.15）が集まれば順不同で復元できる。
 
-QR動画として送信されたファイルをブラウザで受信・保存するWebアプリ。
-スマートフォンのカメラでQR動画を撮影し、復元したバイナリをダウンロードする。
+## 公開URL
 
-送信側ツール（PCでQR動画を生成）と組み合わせて使う。
-プロトコル仕様: 各QRペイロードは `index/total|filename|base64chunk` 形式。
-先頭チャンク（index=0）のみ filename が入る。
+- **受信**: https://f2sk.github.io/qr-file-receiver/
+- **送信**（ブラウザでmp4生成 / WebCodecs / 自己完結HTML）: https://f2sk.github.io/qr-file-receiver/send.html
+- 旧版（逐次チャンク方式・お蔵入り）: https://f2sk.github.io/qr-file-receiver/legacy/
 
 ## 使い方
 
-1. 任意のWebサーバ（GitHub Pages等のHTTPS配信）に `index.html` を配置する
-2. スマートフォン（Android Chrome等）でアクセス
-3. 「スキャン開始」を押してカメラ権限を許可
-4. 送信側PCで再生中のQR動画にカメラを向ける
-5. 全チャンク受信完了後、「保存」ボタンでファイルがダウンロードフォルダに保存される
+1. PCのChrome / Edgeで **send.html** を開き、ファイルを選んで「動画を生成」→ mp4を保存
+2. その mp4 を全画面でループ再生
+3. スマホで **受信ページ** を開き、カメラを動画に向ける。完了後「保存」でダウンロード
 
-カメラの起動には HTTPS（または localhost）が必要。
+カメラ利用にはHTTPS（またはlocalhost）が必要。
 
-## 機能
+## 構成
 
-- カメラからのリアルタイムQR読み取り
-- BarcodeDetector API優先（対応環境のみ）、未対応時はjsQRにフォールバック
-- チャンク格子状の受信進捗表示（緑=受信済み / 灰=未受信）
-- 認識インジケーター（QR検出時に緑点滅）
-- 重複チャンク自動排除・任意順での受信
-- Blobダウンロードによるファイル保存（送信時のファイル名を維持）
+| ファイル | 役割 |
+|---|---|
+| `index.html` | 受信（単一HTML / デコードは zxing-wasm、CDN読込） |
+| `send.html` | 送信（単一HTML / WebCodecsでH.264オールイントラmp4生成。qrcode・mp4-muxerを埋め込み済みでCDN参照ゼロ→ローカル/オフライン動作可） |
+| `legacy/index.html` | 旧・逐次チャンク方式の受信機（保管） |
 
-## 依存
+送受信の開発一式（Node CLI送信・共有fountainコア・検証スクリプト）は別ワークスペース `qr-fountain` にある。
 
-- jsQR (CDN: jsdelivr) — フォールバック用
-- BarcodeDetector API（ブラウザ内蔵）
+## 旧版について
 
-## ファイル構成
-
-- `index.html` — 全機能を含む単一ファイル
+旧「逐次チャンク方式」はペイロードが `index/total|filename|base64chunk` 形式で、全チャンクが揃うまで復元できず、
+光の当たり方で読めないフレームがあると何周しても取りこぼす問題があった。fountain版はこれを構造的に解消したため、
+旧版は `/legacy/` に保管し非推奨とする。
