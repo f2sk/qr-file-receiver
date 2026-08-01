@@ -33,3 +33,14 @@ QR動画でファイルを転送するツール。画面→カメラの片方向
 旧「逐次チャンク方式」はペイロードが `index/total|filename|base64chunk` 形式で、全チャンクが揃うまで復元できず、
 光の当たり方で読めないフレームがあると何周しても取りこぼす問題があった。fountain版はこれを構造的に解消したため、
 旧版は `/legacy/` に保管し非推奨とする。
+
+## ライセンス / Credits
+
+本プロジェクトは MIT License（[LICENSE](LICENSE)）。
+
+fountain符号（LT符号）とフレームプロトコルは
+[decimen-optical-transfer](https://github.com/bashalarmistalt/decimen-optical-transfer)（MIT）の実装を移植・改変したもの。
+送信ページは [node-qrcode](https://github.com/soldair/node-qrcode)（MIT）と
+[mp4-muxer](https://github.com/Vanilagy/mp4-muxer)（MIT）を埋め込み、受信ページは
+[zxing-wasm](https://github.com/Sec-ant/zxing-wasm)（MIT）を利用。
+各ライセンス全文は [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) を参照。
