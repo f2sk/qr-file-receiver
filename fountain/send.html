@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>QRファイル送信 (fountain) — mp4生成</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", "Noto Sans JP", sans-serif;
+      margin: 0; padding: 14px; background: #121212; color: #eee; max-width: 640px;
+    }
+    h1 { font-size: 1.15rem; margin: 0 0 10px; }
+    .grid { display: grid; grid-template-columns: max-content 1fr; gap: 8px 12px; align-items: center; margin-bottom: 12px; }
+    label { font-size: 0.9rem; color: #ccc; }
+    input, select { padding: 6px 8px; border-radius: 6px; border: 1px solid #555; background: #1e1e1e; color: #eee; font-size: 0.9rem; width: 100%; }
+    input[type=file] { border: none; padding: 4px 0; }
+    button {
+      padding: 9px 16px; font-size: 0.95rem; border-radius: 6px; border: 1px solid #2563eb;
+      background: #2563eb; color: #fff; cursor: pointer; margin-right: 8px;
+    }
+    button:disabled { opacity: 0.4; cursor: default; }
+    button.success { background: #16a34a; border-color: #16a34a; }
+    .bar { width: 100%; height: 14px; background: #2a2a2a; border-radius: 7px; overflow: hidden; margin: 10px 0 6px; }
+    .bar > div { height: 100%; width: 0; background: #16a34a; transition: width 100ms linear; }
+    #status { font-size: 0.9rem; min-height: 1.2em; }
+    .meta { font-size: 0.8rem; color: #aaa; white-space: pre-wrap; }
+    .hint { font-size: 0.8rem; color: #999; margin-top: 10px; }
+    a#dl { display: inline-block; margin-top: 10px; color: #4ade80; }
+  </style>
+</head>
+<body>
+  <h1>QRファイル送信 (fountain) — mp4生成</h1>
+
+  <div class="grid">
+    <label>ファイル</label><input type="file" id="file">
+    <label>1フレームbyte</label><input type="number" id="frameBytes" value="1465" min="60" max="2900">
+    <label>fps</label><input type="number" id="fps" value="12" min="1" max="30">
+    <label>冗長度 (×K)</label><input type="number" id="redundancy" value="2.5" min="1" max="10" step="0.1">
+    <label>QR幅(px)</label><input type="number" id="width" value="720" min="240" max="1600">
+    <label>誤り訂正</label>
+    <select id="ecc"><option>L</option><option>M</option><option>Q</option><option>H</option></select>
+  </div>
+
+  <button id="genBtn" disabled>動画を生成</button>
+  <a id="dl" style="display:none"></a>
+
+  <div class="bar"><div id="barFill"></div></div>
+  <div id="status">ファイルを選択してください</div>
+  <div class="meta" id="meta"></div>
+
+  <p class="hint">
+    PCのChrome / Edge（デスクトップ）で動作します（WebCodecs必須）。生成したmp4はOneDrive等に保存して
+    iPhone等で再生できます（H.264オールイントラ）。受信は
+    <a href="https://f2sk.github.io/qr-file-receiver/fountain/" style="color:#60a5fa">こちら</a>。
+  </p>
+
+  <script type="module">
+    import QRCode from "https://esm.sh/qrcode@1.5.4";
+    import { Muxer, ArrayBufferTarget } from "https://esm.sh/mp4-muxer@5.2.2";
+
+    // ===================================================================
+    // shared/*.mjs（エンコーダ側）のインライン展開。
+    // ロジック変更時は shared/protocol.mjs / fountain.mjs / container.mjs と同期すること。
+    // ===================================================================
+    const HEADER_LEN = 20;
+    const MAGIC0 = 0xd1, MAGIC1 = 0x0c;
+    function packFrame(h, block) {
+      const out = new Uint8Array(HEADER_LEN + block.length);
+      const dv = new DataView(out.buffer);
+      dv.setUint8(0, MAGIC0); dv.setUint8(1, MAGIC1);
+      dv.setUint16(2, h.sessionId, true); dv.setUint32(4, h.seq, true);
+      dv.setUint16(8, h.k, true); dv.setUint16(10, h.blockLen, true);
+      dv.setUint32(12, h.totalLen, true); dv.setUint32(16, h.payloadFnv, true);
+      out.set(block, HEADER_LEN);
+      return out;
+    }
+    function fnv1a(bytes) {
+      let h = 0x811c9dc5;
+      for (let i = 0; i < bytes.length; i++) { h ^= bytes[i]; h = Math.imul(h, 0x01000193); }
+      return h >>> 0;
+    }
+    function splitmix32(seed) {
+      let s = seed | 0;
+      return () => {
+        s = (s + 0x9e3779b9) | 0;
+        let t = s ^ (s >>> 16);
+        t = Math.imul(t, 0x21f0aaad); t ^= t >>> 15;
+        t = Math.imul(t, 0x735a2d97); t ^= t >>> 15;
+        return t >>> 0;
+      };
+    }
+    const LN2 = 0.6931471805599453;
+    function dlog(x) {
+      let e = 0, m = x;
+      while (m >= 1.5) { m /= 2; e++; }
+      while (m < 0.75) { m *= 2; e--; }
+      const z = (m - 1) / (m + 1), z2 = z * z;
+      let term = z, sum = 0;
+      for (let n = 1; n <= 21; n += 2) { sum += term / n; term *= z2; }
+      return e * LN2 + 2 * sum;
+    }
+    const SOLITON_C = 0.1, SOLITON_DELTA = 0.5;
+    function solitonCdf(k) {
+      const cdf = new Float64Array(k);
+      if (k === 1) { cdf[0] = 1; return cdf; }
+      const R = Math.max(1, SOLITON_C * dlog(k / SOLITON_DELTA) * Math.sqrt(k));
+      const spike = Math.min(k, Math.ceil(k / R));
+      let total = 0;
+      for (let d = 1; d <= k; d++) {
+        const rho = d === 1 ? 1 / k : 1 / (d * (d - 1));
+        let tau = 0;
+        if (d < spike) tau = R / (d * k);
+        else if (d === spike) tau = (R * Math.max(0, dlog(R / SOLITON_DELTA))) / k;
+        total += rho + tau;
+        cdf[d - 1] = total;
+      }
+      for (let i = 0; i < k; i++) cdf[i] = cdf[i] / total;
+      cdf[k - 1] = 1;
+      return cdf;
+    }
+    function frameSeed(sessionId, seq) {
+      let h = (Math.imul(sessionId + 1, 0x9e3779b1) ^ (seq + 0x85ebca6b)) | 0;
+      h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
+      return (h ^ (h >>> 16)) | 0;
+    }
+    function frameIndices(k, cdf, sessionId, seq) {
+      const rnd = splitmix32(frameSeed(sessionId, seq));
+      const u = rnd() * 2 ** -32;
+      let lo = 0, hi = k - 1;
+      while (lo < hi) { const mid = (lo + hi) >> 1; if (cdf[mid] >= u) hi = mid; else lo = mid + 1; }
+      const d = Math.min(k, lo + 1);
+      if (d > k >> 3) {
+        const scratch = new Uint32Array(k);
+        for (let i = 0; i < k; i++) scratch[i] = i;
+        const out = new Array(d);
+        for (let i = 0; i < d; i++) {
+          const j = i + (rnd() % (k - i));
+          const t = scratch[i]; scratch[i] = scratch[j]; scratch[j] = t;
+          out[i] = scratch[i];
+        }
+        return out;
+      }
+      const set = new Set();
+      while (set.size < d) set.add(rnd() % k);
+      return [...set];
+    }
+    class LTEncoder {
+      constructor(payload, blockLen, sessionId) {
+        this.blockLen = blockLen; this.sessionId = sessionId;
+        this.k = Math.max(1, Math.ceil(payload.length / blockLen));
+        this.words = Math.ceil(blockLen / 4);
+        this.blocks = new Uint32Array(this.k * this.words);
+        const bytes = new Uint8Array(this.blocks.buffer);
+        for (let b = 0; b < this.k; b++) {
+          const src = payload.subarray(b * blockLen, Math.min((b + 1) * blockLen, payload.length));
+          bytes.set(src, b * this.words * 4);
+        }
+        this.cdf = solitonCdf(this.k);
+      }
+      encode(seq) {
+        const idx = frameIndices(this.k, this.cdf, this.sessionId, seq);
+        const out = new Uint32Array(this.words);
+        for (const b of idx) {
+          const off = b * this.words;
+          for (let w = 0; w < this.words; w++) out[w] = (out[w] ^ this.blocks[off + w]) >>> 0;
+        }
+        return new Uint8Array(out.buffer, 0, this.blockLen);
+      }
+    }
+    function wrapFile(name, fileBytes) {
+      const nameBytes = new TextEncoder().encode(name);
+      const out = new Uint8Array(3 + nameBytes.length + fileBytes.length);
+      const dv = new DataView(out.buffer);
+      dv.setUint8(0, 1); dv.setUint16(1, nameBytes.length, true);
+      out.set(nameBytes, 3); out.set(fileBytes, 3 + nameBytes.length);
+      return out;
+    }
+
+    // ===================================================================
+    // アプリ本体
+    // ===================================================================
+    const $ = (id) => document.getElementById(id);
+    const fileEl = $("file"), genBtn = $("genBtn"), dlEl = $("dl");
+    const barFill = $("barFill"), statusEl = $("status"), metaEl = $("meta");
+    let picked = null;
+
+    fileEl.addEventListener("change", () => {
+      picked = fileEl.files && fileEl.files[0] ? fileEl.files[0] : null;
+      genBtn.disabled = !picked;
+      dlEl.style.display = "none";
+      statusEl.textContent = picked ? `選択: ${picked.name} (${(picked.size / 1024).toFixed(1)} KB)` : "ファイルを選択してください";
+      metaEl.textContent = "";
+      barFill.style.width = "0";
+    });
+
+    const MASK_PATTERN = 4;
+    function makeQrImageData(bytes, ecc, version, margin) {
+      const qr = QRCode.create([{ data: Array.from(bytes), mode: "byte" }], {
+        errorCorrectionLevel: ecc, version, maskPattern: MASK_PATTERN,
+      });
+      const size = qr.modules.size, data = qr.modules.data;
+      const total = size + 2 * margin;
+      const img = new ImageData(total, total);
+      const px = new Uint32Array(img.data.buffer);
+      px.fill(0xffffffff);
+      for (let y = 0; y < size; y++) {
+        const row = (y + margin) * total + margin, src = y * size;
+        for (let x = 0; x < size; x++) if (data[src + x]) px[row + x] = 0xff000000;
+      }
+      return { img, total, version: qr.version, size };
+    }
+
+    async function generate() {
+      if (!picked) return;
+      if (!("VideoEncoder" in window)) {
+        statusEl.textContent = "✗ このブラウザはWebCodecsに非対応です（PCのChrome/Edgeで開いてください）";
+        return;
+      }
+      genBtn.disabled = true; dlEl.style.display = "none";
+      const ecc = $("ecc").value;
+      const fps = Number($("fps").value);
+      const frameBytes = Number($("frameBytes").value);
+      const redundancy = Number($("redundancy").value);
+      const width = Number($("width").value);
+      const margin = 4;
+
+      const fileBytes = new Uint8Array(await picked.arrayBuffer());
+      const payload = wrapFile(picked.name, fileBytes);
+      const blockLen = frameBytes - HEADER_LEN;
+      const sessionId = (Math.floor(Math.random() * 0xffff) + 1) & 0xffff;
+      const enc = new LTEncoder(payload, blockLen, sessionId);
+      const header = {
+        sessionId, seq: 0, k: enc.k, blockLen,
+        totalLen: payload.length, payloadFnv: fnv1a(payload),
+      };
+      const M = Math.ceil(enc.k * redundancy);
+
+      // 先頭フレームで版・寸法を確定
+      let first;
+      try {
+        first = makeQrImageData(packFrame({ ...header, seq: 0 }, enc.encode(0)), ecc, undefined, margin);
+      } catch (e) {
+        statusEl.textContent = `✗ QR生成失敗（1フレームbyteがECC ${ecc}の容量超過かも）: ${e.message}`;
+        genBtn.disabled = false; return;
+      }
+      const version = first.version;
+      const total = first.total;
+      const scale = Math.max(1, Math.floor(width / total));
+      const px = total * scale;
+      const cw = px + (px & 1); // H.264はyuv420で偶数寸法必須
+
+      // 描画キャンバス
+      const staging = document.createElement("canvas");
+      staging.width = total; staging.height = total;
+      const sctx = staging.getContext("2d");
+      const out = document.createElement("canvas");
+      out.width = cw; out.height = cw;
+      const octx = out.getContext("2d");
+      octx.imageSmoothingEnabled = false;
+
+      // エンコーダ設定（iOS再生のため avc/baseline系を優先）
+      const muxer = new Muxer({
+        target: new ArrayBufferTarget(),
+        video: { codec: "avc", width: cw, height: cw },
+        fastStart: "in-memory",
+      });
+      const candidates = ["avc1.420028", "avc1.4d0028", "avc1.640028"];
+      const bitrate = Math.min(24_000_000, Math.round(cw * cw * fps * 0.25));
+      let codec = null;
+      for (const c of candidates) {
+        try {
+          const s = await VideoEncoder.isConfigSupported({ codec: c, width: cw, height: cw, framerate: fps, bitrate });
+          if (s.supported) { codec = c; break; }
+        } catch {}
+      }
+      if (!codec) {
+        statusEl.textContent = "✗ このブラウザはH.264エンコードに非対応（PCのChrome/Edgeを推奨）";
+        genBtn.disabled = false; return;
+      }
+
+      const encoder = new VideoEncoder({
+        output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+        error: (e) => { statusEl.textContent = "✗ エンコードエラー: " + e.message; },
+      });
+      encoder.configure({ codec, width: cw, height: cw, framerate: fps, bitrate, latencyMode: "quality" });
+
+      statusEl.textContent = "生成中…";
+      metaEl.textContent =
+        `K=${enc.k} / frameBytes=${frameBytes} / QR V${version} ECC ${ecc}\n` +
+        `フレーム M=${M} (冗長 ${(M / enc.k).toFixed(2)}x) / ${fps}fps / ${cw}px / ${codec} / sessionId=${sessionId}`;
+
+      const t0 = performance.now();
+      const usPerFrame = 1e6 / fps;
+      for (let seq = 0; seq < M; seq++) {
+        const q = seq === 0 ? first : makeQrImageData(packFrame({ ...header, seq }, enc.encode(seq)), ecc, version, margin);
+        sctx.putImageData(q.img, 0, 0);
+        octx.fillStyle = "#fff"; octx.fillRect(0, 0, cw, cw);
+        octx.drawImage(staging, 0, 0, total, total, 0, 0, px, px);
+        const frame = new VideoFrame(out, { timestamp: Math.round(seq * usPerFrame), duration: Math.round(usPerFrame) });
+        // 全フレームをキーフレーム（QRは互いに無相関なのでオールイントラが最適）
+        encoder.encode(frame, { keyFrame: true });
+        frame.close();
+        // バックプレッシャ: エンコードキューが詰まったら待つ
+        while (encoder.encodeQueueSize > 8) await new Promise((r) => setTimeout(r, 0));
+        if ((seq + 1) % 5 === 0 || seq + 1 === M) {
+          barFill.style.width = (((seq + 1) / M) * 100).toFixed(1) + "%";
+          statusEl.textContent = `生成中… ${seq + 1}/${M}`;
+          await new Promise((r) => requestAnimationFrame(r));
+        }
+      }
+      await encoder.flush();
+      muxer.finalize();
+
+      const blob = new Blob([muxer.target.buffer], { type: "video/mp4" });
+      const url = URL.createObjectURL(blob);
+      const outName = picked.name.replace(/\.[^.]+$/, "") + ".mp4";
+      dlEl.href = url; dlEl.download = outName;
+      dlEl.textContent = `⬇ ${outName} を保存 (${(blob.size / 1024 / 1024).toFixed(2)} MB)`;
+      dlEl.style.display = "inline-block";
+      const dt = (performance.now() - t0) / 1000;
+      statusEl.textContent = `完了 (${dt.toFixed(1)}s)。下のリンクから保存してください。`;
+      barFill.style.width = "100%";
+      genBtn.disabled = false;
+    }
+
+    genBtn.addEventListener("click", () => { generate().catch((e) => { statusEl.textContent = "✗ " + e.message; genBtn.disabled = false; }); });
+  </script>
+</body>
+</html>
