@@ -1960,7 +1960,7 @@ export {
     }
     const QRCodeMod = await loadVendor("vendor-qrcode");
     const qrCreate = QRCodeMod.create || (QRCodeMod.default && QRCodeMod.default.create);
-    const { Muxer, ArrayBufferTarget } = await loadVendor("vendor-mp4muxer");
+    const { Muxer, ArrayBufferTarget, FileSystemWritableFileStreamTarget } = await loadVendor("vendor-mp4muxer");
 
     // ===================================================================
     // shared/*.mjs（エンコーダ側）のインライン展開。
@@ -2121,6 +2121,23 @@ export {
         return;
       }
       genBtn.disabled = true; dlEl.style.display = "none";
+      const outName = picked.name.replace(/\.[^.]+$/, "") + ".mp4";
+      // 大きい出力はメモリに載らない → 可能ならファイルへ直接ストリーム(Chrome/Edge)。
+      // ユーザー操作直後に呼ぶ必要があるため、重い処理の前にここで確保する。
+      const canStream = typeof window.showSaveFilePicker === "function";
+      let writable = null;
+      if (canStream) {
+        try {
+          const fh = await window.showSaveFilePicker({
+            suggestedName: outName,
+            types: [{ description: "MP4 video", accept: { "video/mp4": [".mp4"] } }],
+          });
+          writable = await fh.createWritable();
+        } catch (e) {
+          if (e && e.name === "AbortError") { statusEl.textContent = "キャンセルしました"; genBtn.disabled = false; return; }
+          writable = null; // ピッカー不可→メモリ版へフォールバック
+        }
+      }
       const ecc = $("ecc").value;
       const fps = Number($("fps").value);
       const frameBytes = Number($("frameBytes").value);
@@ -2163,10 +2180,13 @@ export {
       octx.imageSmoothingEnabled = false;
 
       // エンコーダ設定（iOS再生のため avc/baseline系を優先）
+      const target = writable
+        ? new FileSystemWritableFileStreamTarget(writable)
+        : new ArrayBufferTarget();
       const muxer = new Muxer({
-        target: new ArrayBufferTarget(),
+        target,
         video: { codec: "avc", width: cw, height: cw },
-        fastStart: "in-memory",
+        fastStart: writable ? false : "in-memory", // 直書き時はmoov末尾でメモリ平坦
       });
       const candidates = ["avc1.420028", "avc1.4d0028", "avc1.640028"];
       const bitrate = Math.min(24_000_000, Math.round(cw * cw * fps * 0.25));
@@ -2188,10 +2208,18 @@ export {
       });
       encoder.configure({ codec, width: cw, height: cw, framerate: fps, bitrate, latencyMode: "quality" });
 
+      const estSec = M / fps;
+      const estMB = (bitrate / 8) * estSec / 1e6;
       statusEl.textContent = "生成中…";
       metaEl.textContent =
         `K=${enc.k} / frameBytes=${frameBytes} / QR V${version} ECC ${ecc}\n` +
-        `フレーム M=${M} (冗長 ${(M / enc.k).toFixed(2)}x) / ${fps}fps / ${cw}px / ${codec} / sessionId=${sessionId}`;
+        `フレーム M=${M} (冗長 ${(M / enc.k).toFixed(2)}x) / ${fps}fps / ${cw}px / ${codec} / sessionId=${sessionId}\n` +
+        `推定: 長さ ${estSec.toFixed(0)}s / サイズ ~${estMB.toFixed(0)}MB / 出力 ${writable ? "ファイル直書き" : "メモリ"}`;
+      if (!writable && estMB > 400) {
+        statusEl.textContent =
+          `⚠ 推定 ~${estMB.toFixed(0)}MB。メモリ確保に失敗する場合はChrome/Edgeで開く（ファイル直書き）` +
+          `か、1フレームbyteを上げ・冗長度を下げてください。続行します…`;
+      }
 
       const t0 = performance.now();
       const usPerFrame = 1e6 / fps;
@@ -2214,15 +2242,20 @@ export {
       }
       await encoder.flush();
       muxer.finalize();
-
-      const blob = new Blob([muxer.target.buffer], { type: "video/mp4" });
-      const url = URL.createObjectURL(blob);
-      const outName = picked.name.replace(/\.[^.]+$/, "") + ".mp4";
-      dlEl.href = url; dlEl.download = outName;
-      dlEl.textContent = `⬇ ${outName} を保存 (${(blob.size / 1024 / 1024).toFixed(2)} MB)`;
-      dlEl.style.display = "inline-block";
       const dt = (performance.now() - t0) / 1000;
-      statusEl.textContent = `完了 (${dt.toFixed(1)}s)。下のリンクから保存してください。`;
+
+      if (writable) {
+        await writable.close(); // ディスクへ確定
+        dlEl.style.display = "none";
+        statusEl.textContent = `完了 (${dt.toFixed(1)}s)。${outName} に保存しました。`;
+      } else {
+        const blob = new Blob([muxer.target.buffer], { type: "video/mp4" });
+        const url = URL.createObjectURL(blob);
+        dlEl.href = url; dlEl.download = outName;
+        dlEl.textContent = `⬇ ${outName} を保存 (${(blob.size / 1024 / 1024).toFixed(2)} MB)`;
+        dlEl.style.display = "inline-block";
+        statusEl.textContent = `完了 (${dt.toFixed(1)}s)。下のリンクから保存してください。`;
+      }
       barFill.style.width = "100%";
       genBtn.disabled = false;
     }
