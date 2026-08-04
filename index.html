@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-  <title>QRファイル受信 (fountain)</title>
+  <title>Transfer</title>
   <style>
     :root { color-scheme: dark; }
     * { box-sizing: border-box; }
@@ -39,7 +39,7 @@
   </style>
 </head>
 <body>
-  <h1>QRファイル受信 (fountain)</h1>
+  <h1>Transfer</h1>
 
   <div class="row">
     <button id="startBtn" class="primary">スキャン開始</button>
@@ -62,7 +62,7 @@
   </div>
   <canvas id="work"></canvas>
   <p class="hint">QR動画をカメラに向けてください。fountain符号なので、読めないフレームがあっても十分な枚数が集まれば復元できます。</p>
-  <p class="hint">動画の作成（送信側）は <a href="https://f2sk.github.io/qr-file-receiver/send.html" style="color:#60a5fa">send.html</a>（PCのChrome/Edge）。</p>
+  <p class="hint">動画の作成（PC）は <a href="tx.html" style="color:#60a5fa">こちら</a>。</p>
 
   <script type="module">
     import { readBarcodes, prepareZXingModule } from "https://esm.sh/zxing-wasm@2.2.4/reader";

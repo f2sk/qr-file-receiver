@@ -7,12 +7,12 @@ QR動画でファイルを転送するツール。画面→カメラの片方向
 ## 公開URL
 
 - **受信**: https://f2sk.github.io/qr-file-receiver/
-- **送信**（ブラウザでmp4生成 / WebCodecs / 自己完結HTML）: https://f2sk.github.io/qr-file-receiver/send.html
+- **送信**（ブラウザでmp4生成 / WebCodecs / 自己完結HTML）: https://f2sk.github.io/qr-file-receiver/tx.html
 - 旧版（逐次チャンク方式・お蔵入り）: https://f2sk.github.io/qr-file-receiver/legacy/
 
 ## 使い方
 
-1. PCのChrome / Edgeで **send.html** を開き、ファイルを選んで「動画を生成」→ mp4を保存
+1. PCのChrome / Edgeで **tx.html** を開き、ファイルを選んで「動画を生成」→ mp4を保存
 2. その mp4 を全画面でループ再生
 3. スマホで **受信ページ** を開き、カメラを動画に向ける。完了後「保存」でダウンロード
 
@@ -23,7 +23,7 @@ QR動画でファイルを転送するツール。画面→カメラの片方向
 | ファイル | 役割 |
 |---|---|
 | `index.html` | 受信（単一HTML / デコードは zxing-wasm、CDN読込） |
-| `send.html` | 送信（単一HTML / WebCodecsでH.264オールイントラmp4生成。qrcode・mp4-muxerを埋め込み済みでCDN参照ゼロ→ローカル/オフライン動作可） |
+| `tx.html` | 送信（単一HTML / WebCodecsでH.264オールイントラmp4生成。qrcode・mp4-muxerを埋め込み済みでCDN参照ゼロ→ローカル/オフライン動作可） |
 | `legacy/index.html` | 旧・逐次チャンク方式の受信機（保管） |
 
 送受信の開発一式（Node CLI送信・共有fountainコア・検証スクリプト）は別ワークスペース `qr-fountain` にある。

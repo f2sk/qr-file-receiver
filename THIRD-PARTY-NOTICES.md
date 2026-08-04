@@ -7,7 +7,7 @@
 
 ## 1. decimen-optical-transfer （fountain符号コアの移植元）
 
-`index.html` および `send.html` に展開されている fountain 符号（LT符号）と
+`index.html` および `tx.html` に展開されている fountain 符号（LT符号）と
 フレームプロトコルのロジックは、下記リポジトリの TypeScript 実装を移植・改変したものです。
 
 - Source: https://github.com/bashalarmistalt/decimen-optical-transfer
@@ -38,9 +38,9 @@ SOFTWARE.
 
 ---
 
-## 2. node-qrcode （send.html に埋め込み）
+## 2. node-qrcode （tx.html に埋め込み）
 
-QRコード生成に使用。`send.html` にバンドルを埋め込んでいます。
+QRコード生成に使用。`tx.html` にバンドルを埋め込んでいます。
 
 - Source: https://github.com/soldair/node-qrcode
 
@@ -58,9 +58,9 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ---
 
-## 3. mp4-muxer （send.html に埋め込み）
+## 3. mp4-muxer （tx.html に埋め込み）
 
-mp4 コンテナ生成に使用。`send.html` にバンドルを埋め込んでいます。
+mp4 コンテナ生成に使用。`tx.html` にバンドルを埋め込んでいます。
 
 - Source: https://github.com/Vanilagy/mp4-muxer
 
