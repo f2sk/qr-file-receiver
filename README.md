@@ -6,11 +6,9 @@ QR動画でファイルを転送するツール。画面→カメラの片方向
 
 ## 公開URL
 
-本リポジトリを GitHub Pages で配信した際のパス（`<site>` は配信先ルート）:
-
-- **受信**: `<site>/`（`index.html`）
-- **送信**（ブラウザでmp4生成 / WebCodecs / 自己完結HTML）: `<site>/tx.html`
-- 旧版（逐次チャンク方式・お蔵入り）: `<site>/legacy/`
+- **受信**: https://f2sk.github.io/qr-file-receiver/
+- **送信**（ブラウザでmp4生成 / WebCodecs / 自己完結HTML）: https://f2sk.github.io/qr-file-receiver/tx.html
+- 旧版（逐次チャンク方式・お蔵入り）: https://f2sk.github.io/qr-file-receiver/legacy/
 
 ## 使い方
 
