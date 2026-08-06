@@ -28,6 +28,13 @@
     .meta { font-size: 0.8rem; color: #aaa; white-space: pre-wrap; }
     .hint { font-size: 0.8rem; color: #999; margin-top: 10px; }
     a#dl { display: inline-block; margin-top: 10px; color: #4ade80; }
+    button.alt { background: #334155; border-color: #475569; }
+    #live { position: fixed; inset: 0; background: #000; z-index: 50; display: none;
+      flex-direction: column; align-items: center; justify-content: center; }
+    #live.on { display: flex; }
+    #liveBar { position: fixed; top: 8px; left: 8px; right: 8px; display: flex; gap: 12px;
+      align-items: center; color: #ddd; font-size: 0.85rem; }
+    #liveCanvas { background: #fff; image-rendering: pixelated; }
   </style>
 </head>
 <body>
@@ -43,7 +50,8 @@
     <select id="ecc"><option>L</option><option>M</option><option>Q</option><option>H</option></select>
   </div>
 
-  <button id="genBtn" disabled>動画を生成</button>
+  <button id="genFileBtn" disabled>① 動画ファイルに書き出し</button>
+  <button id="genLiveBtn" class="alt" disabled>② ブラウザで表示（即時）</button>
   <a id="dl" style="display:none"></a>
 
   <div class="bar"><div id="barFill"></div></div>
@@ -51,8 +59,17 @@
   <div class="meta" id="meta"></div>
 
   <p class="hint">
-    PCのChrome / Edge（デスクトップ）で動作します（WebCodecs必須）。
+    ① 動画ファイル書き出し: mp4を作って保存（WebCodecs必須 / PC Chrome・Edge）。生成完了後に転送。<br>
+    ② ブラウザで表示: QR動画を画面に直接表示（書き出さない）。読み込み後すぐ転送を開始できる。
   </p>
+
+  <div id="live">
+    <div id="liveBar">
+      <button id="stopLiveBtn">■ 停止</button>
+      <span id="liveStatus"></span>
+    </div>
+    <canvas id="liveCanvas"></canvas>
+  </div>
 
   <!-- vendored libs（オフライン動作のためCDNではなく埋め込み。build-send.mjs が中身を注入） -->
   <script type="text/plain" id="vendor-qrcode">
@@ -2083,13 +2100,16 @@ export {
     // アプリ本体
     // ===================================================================
     const $ = (id) => document.getElementById(id);
-    const fileEl = $("file"), genBtn = $("genBtn"), dlEl = $("dl");
+    const fileEl = $("file"), genFileBtn = $("genFileBtn"), genLiveBtn = $("genLiveBtn"), dlEl = $("dl");
     const barFill = $("barFill"), statusEl = $("status"), metaEl = $("meta");
     let picked = null;
 
+    // 処理中は両ボタンを無効化（busy=true）。busy=false で選択状態に応じて戻す。
+    const busy = (b) => { genFileBtn.disabled = b || !picked; genLiveBtn.disabled = b || !picked; };
+
     fileEl.addEventListener("change", () => {
       picked = fileEl.files && fileEl.files[0] ? fileEl.files[0] : null;
-      genBtn.disabled = !picked;
+      busy(false);
       dlEl.style.display = "none";
       statusEl.textContent = picked ? `選択: ${picked.name} (${(picked.size / 1024).toFixed(1)} KB)` : "ファイルを選択してください";
       metaEl.textContent = "";
@@ -2119,7 +2139,7 @@ export {
         statusEl.textContent = "✗ このブラウザはWebCodecsに非対応です（PCのChrome/Edgeで開いてください）";
         return;
       }
-      genBtn.disabled = true; dlEl.style.display = "none";
+      busy(true); dlEl.style.display = "none";
       const outName = picked.name.replace(/\.[^.]+$/, "") + ".mp4";
       // 大きい出力はメモリに載らない → 可能ならファイルへ直接ストリーム(Chrome/Edge)。
       // ユーザー操作直後に呼ぶ必要があるため、重い処理の前にここで確保する。
@@ -2133,7 +2153,7 @@ export {
           });
           writable = await fh.createWritable();
         } catch (e) {
-          if (e && e.name === "AbortError") { statusEl.textContent = "キャンセルしました"; genBtn.disabled = false; return; }
+          if (e && e.name === "AbortError") { statusEl.textContent = "キャンセルしました"; busy(false); return; }
           writable = null; // ピッカー不可→メモリ版へフォールバック
         }
       }
@@ -2161,7 +2181,7 @@ export {
         first = makeQrImageData(packFrame({ ...header, seq: 0 }, enc.encode(0)), ecc, undefined, margin);
       } catch (e) {
         statusEl.textContent = `✗ QR生成失敗（1フレームbyteがECC ${ecc}の容量超過かも）: ${e.message}`;
-        genBtn.disabled = false; return;
+        busy(false); return;
       }
       const version = first.version;
       const total = first.total;
@@ -2198,7 +2218,7 @@ export {
       }
       if (!codec) {
         statusEl.textContent = "✗ このブラウザはH.264エンコードに非対応（PCのChrome/Edgeを推奨）";
-        genBtn.disabled = false; return;
+        busy(false); return;
       }
 
       const encoder = new VideoEncoder({
@@ -2256,10 +2276,84 @@ export {
         statusEl.textContent = `完了 (${dt.toFixed(1)}s)。下のリンクから保存してください。`;
       }
       barFill.style.width = "100%";
-      genBtn.disabled = false;
+      busy(false);
     }
 
-    genBtn.addEventListener("click", () => { generate().catch((e) => { statusEl.textContent = "✗ " + e.message; genBtn.disabled = false; }); });
+    // ---- モード2: ブラウザ上でQR動画を表示（書き出さない・即時転送） ----
+    let liveRAF = null, liveRunning = false, liveWakeLock = null, liveSizeHandler = null;
+
+    async function startLive() {
+      if (!picked || liveRunning) return;
+      const ecc = $("ecc").value;
+      const fps = Number($("fps").value);
+      const frameBytes = Number($("frameBytes").value);
+      const margin = 4;
+      const blockLen = frameBytes - HEADER_LEN;
+
+      const fileBytes = new Uint8Array(await picked.arrayBuffer());
+      const payload = wrapFile(picked.name, fileBytes);
+      const sessionId = (Math.floor(Math.random() * 0xffff) + 1) & 0xffff;
+      const enc = new LTEncoder(payload, blockLen, sessionId);
+      const header = {
+        sessionId, seq: 0, k: enc.k, blockLen,
+        totalLen: payload.length, payloadFnv: fnv1a(payload),
+      };
+
+      let first;
+      try { first = makeQrImageData(packFrame({ ...header, seq: 0 }, enc.encode(0)), ecc, undefined, margin); }
+      catch (e) { statusEl.textContent = `✗ QR生成失敗（1フレームbyteがECC ${ecc}の容量超過かも）: ${e.message}`; return; }
+      const version = first.version, total = first.total;
+
+      const staging = document.createElement("canvas");
+      staging.width = total; staging.height = total;
+      const sctx = staging.getContext("2d");
+      const cv = $("liveCanvas"), cctx = cv.getContext("2d");
+      cctx.imageSmoothingEnabled = false;
+      const sizeLive = () => {
+        const budget = Math.min(window.innerWidth, window.innerHeight) * 0.92;
+        const scale = Math.max(1, Math.floor(budget / total));
+        cv.width = total * scale; cv.height = total * scale;
+      };
+      sizeLive();
+      liveSizeHandler = sizeLive;
+      window.addEventListener("resize", sizeLive);
+
+      $("liveStatus").textContent = `K=${enc.k} / V${version} / ${fps}fps（fountain: 無限ループ表示）`;
+      $("live").classList.add("on");
+      liveRunning = true;
+      try { liveWakeLock = await navigator.wakeLock?.request("screen"); } catch {}
+
+      let seq = 0;
+      const interval = 1000 / fps;
+      let nextAt = performance.now();
+      const tick = (now) => {
+        if (!liveRunning) return;
+        liveRAF = requestAnimationFrame(tick);
+        if (now < nextAt) return;
+        const q = seq === 0 ? first : makeQrImageData(packFrame({ ...header, seq }, enc.encode(seq)), ecc, version, margin);
+        sctx.putImageData(q.img, 0, 0);
+        cctx.drawImage(staging, 0, 0, total, total, 0, 0, cv.width, cv.height);
+        seq++;
+        nextAt += interval;
+        if (now - nextAt > 3 * interval) nextAt = now + interval; // 遅れたら追いつかず等間隔維持
+      };
+      liveRAF = requestAnimationFrame(tick);
+    }
+
+    function stopLive() {
+      liveRunning = false;
+      if (liveRAF) cancelAnimationFrame(liveRAF);
+      liveRAF = null;
+      if (liveSizeHandler) { window.removeEventListener("resize", liveSizeHandler); liveSizeHandler = null; }
+      try { liveWakeLock && liveWakeLock.release(); } catch {}
+      liveWakeLock = null;
+      $("live").classList.remove("on");
+      statusEl.textContent = "表示を終了しました";
+    }
+
+    genFileBtn.addEventListener("click", () => { generate().catch((e) => { statusEl.textContent = "✗ " + e.message; busy(false); }); });
+    genLiveBtn.addEventListener("click", () => { startLive().catch((e) => { statusEl.textContent = "✗ " + e.message; }); });
+    $("stopLiveBtn").addEventListener("click", stopLive);
   </script>
 </body>
 </html>
