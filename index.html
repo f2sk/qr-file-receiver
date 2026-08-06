@@ -266,6 +266,7 @@
     let stream = null, scanning = false, busy = false;
     let dec = null;
     let result = null; // { name, bytes }
+    let transferStart = 0; // このセッションの最初のフレーム受信時刻（実効レート計測用）
 
     const setStatus = (m) => { statusEl.textContent = m; };
     function blink() {
@@ -293,6 +294,7 @@
         dec = new LTDecoder(h.k, h.blockLen, h.sessionId, h.totalLen);
         result = null;
         saveBtn.disabled = true;
+        transferStart = performance.now(); // 転送開始＝最初のフレーム
       }
       if (dec.isComplete) return;
       dec.addFrame(h.seq, block);
@@ -313,7 +315,14 @@
       stopCamera();
       saveBtn.disabled = false;
       updateProgress();
-      setStatus(`受信完了: ${un.name} (${(un.bytes.length / 1024).toFixed(1)} KB)。「保存」を押してください。`);
+      // 実効転送レート = ファイルbyte × 8 ÷ 経過秒（最初のフレーム→完了）
+      const elapsedSec = Math.max(0.001, (performance.now() - transferStart) / 1000);
+      const kbps = (un.bytes.length * 8) / elapsedSec / 1000;
+      const kb = un.bytes.length / 1024;
+      setStatus(
+        `受信完了: ${un.name} (${kb.toFixed(1)} KB) / 実効 ${kbps.toFixed(1)} kbps` +
+        `（${elapsedSec.toFixed(1)}s・${dec.framesNew}枚）。「保存」を押してください。`
+      );
     }
 
     function saveFile() {
